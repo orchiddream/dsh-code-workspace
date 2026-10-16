@@ -43,7 +43,23 @@ DSH 的工作区是**单根目录**，`workspaceRegistry.create()` 也只接受�
 
 ## 安装
 
-`desktop` profile 由 Electron 应用独占：`dsh plugin --profile desktop add …` 会被**直接拒绝**（`@deepseek-ai/dsh/lib/bin.js:36`）。而在应用内的插件管理器里安装会走 pnpm，pnpm 会先校验 profile 的**整个** `pnpm-lock.yaml` —— 只要 lockfile 里存在任何比 `minimumReleaseAge` 更新的包，安装就会整体失败，与你装的是哪个插件无关（见下方「pnpm 策略」）。
+已发布到 npm：[`dsh-code-workspace`](https://www.npmjs.com/package/dsh-code-workspace)。
+
+### 装进桌面应用
+
+设置 → **插件** → **Add plugin** → 填 `dsh-code-workspace` → Install → Enable now。Registry 保持 pnpm 自己的，或选**中国大陆镜像**（`registry.npmmirror.com`，自动同步）；**不要**把 GitHub 地址填进 Registry 那一栏，否则 pnpm 会拿它重新解析整个 profile，任何安装都会失败。
+
+`desktop` profile 由 Electron 应用独占：终端里的 `dsh plugin --profile desktop add …` 会被**直接拒绝**（`@deepseek-ai/dsh/lib/bin.js:36`），所以应用内的插件页才是受支持的入口。
+
+### 装进其他 profile
+
+```bash
+dsh plugin --profile web add dsh-code-workspace
+```
+
+Git 地址（`github:orchiddream/dsh-code-workspace`）同样可以，但 DSH 会先用 `git ls-remote` 预检 GitHub，pnpm 随后还会在所选 registry 上重新解析 profile，所以这条路需要能稳定访问 github.com 的 HTTPS。
+
+### 从源码挂载（开发用）
 
 `link:` 依赖既不需要联网也不需要包管理器，所以用仓库自带的脚本手工挂载：
 
@@ -68,9 +84,19 @@ node tools/profile-link.mjs uninstall --profile desktop   # 卸载（只删它�
 
 脚本是幂等的，写之前会备份 `package.json`，并且只删除能证明指向本插件的联接。
 
-### pnpm 策略（为什么 GUI 安装会失败）
+### pnpm 供应链策略
 
-profile 的 `pnpm-workspace.yaml` 启用了 `minimumReleaseAgeExclude`，说明这台机器上 pnpm 的 `minimumReleaseAge` 策略是生效的。它校验的是 **lockfile 整体**，不是本次要装的包，所以只要 lockfile 里有一个「太新」的包（例如 `@michengai/dsh-skills-manager@1.1.21`），任何安装都会被拒。这属于既有的环境状态，与 `dsh-code-workspace` 无关；上面那条手工 link 路径完全绕过 pnpm，所以不受影响。
+DSH 的 profile 用带「新版本冷静期」的 pnpm 运行（这里 `minimumReleaseAge` = 24 小时）。两个后果：
+
+- 几分钟前刚发布的版本照样能装：pnpm 会放行，并把它追加进 profile `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude`。
+- 每次安装前都会先按该策略校验**整个 lockfile**，而 pnpm **只认每个包名的第一条规则**（[pnpm#732](https://github.com/pnpm/pnpm/issues/732)）。同一个包名出现两条规则时，第二条被忽略，整个 profile 的所有安装都会被拒，直到把它们合并：
+
+  ```yaml
+  minimumReleaseAgeExclude:
+    - dsh-ide-git@0.18.4 || 0.18.5 || 0.18.6
+  ```
+
+  插件市场在自己的操作前会自动合并重复规则；手工改过的 profile 可能需要自己合一次。这属于环境状态，与 `dsh-code-workspace` 无关。
 
 ### ⚠️ 必须停用 `dsh-multi-folder`
 

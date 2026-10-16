@@ -43,7 +43,23 @@ Why the file's own directory is not the root: DSH identifies a workspace by its 
 
 ## Install
 
-A `desktop` profile is owned exclusively by the Electron application: `dsh plugin --profile desktop add …` is **refused outright** (`@deepseek-ai/dsh/lib/bin.js:36`). Installing from the in-app plugin manager runs pnpm, and pnpm verifies the profile's **whole** `pnpm-lock.yaml` before installing — so a lockfile containing any package younger than `minimumReleaseAge` makes *every* install fail, regardless of which plugin you are adding (see "The pnpm policy" below).
+Published on npm as [`dsh-code-workspace`](https://www.npmjs.com/package/dsh-code-workspace).
+
+### Into the desktop app
+
+Settings → **Plugins** → **Add plugin** → `dsh-code-workspace` → Install → Enable now. Leave the registry at pnpm's own or the **mainland-China mirror** (`registry.npmmirror.com`, synced automatically); do not put a GitHub URL in the registry field, or pnpm re-resolves the whole profile against it and every install fails.
+
+A `desktop` profile is owned exclusively by the Electron application: `dsh plugin --profile desktop add …` from a terminal is **refused outright** (`@deepseek-ai/dsh/lib/bin.js:36`), so the in-app page is the supported route.
+
+### Into any other profile
+
+```bash
+dsh plugin --profile web add dsh-code-workspace
+```
+
+A Git address (`github:orchiddream/dsh-code-workspace`) works too, but DSH pre-checks GitHub with `git ls-remote` and pnpm then re-resolves the profile at the chosen registry, so that route needs working HTTPS to github.com.
+
+### From a checkout (development)
 
 A `link:` dependency needs neither the network nor a package manager, so mount it with the script this repo ships:
 
@@ -67,9 +83,19 @@ node tools/profile-link.mjs uninstall --profile desktop   # remove it (only the 
 
 The script is idempotent, backs up `package.json` before writing, and only removes a junction it can prove points at this plugin.
 
-### The pnpm policy (why the GUI install fails)
+### The pnpm supply-chain policy
 
-The profile's `pnpm-workspace.yaml` carries a `minimumReleaseAgeExclude` list, which means pnpm's `minimumReleaseAge` supply-chain policy is active on this machine. That check runs over the **lockfile as a whole**, not over the package being installed, so a single "too new" entry (here `@michengai/dsh-skills-manager@1.1.21`) rejects every installation. It is a pre-existing environment condition, unrelated to `dsh-code-workspace`; the manual link above bypasses pnpm entirely and is unaffected.
+DSH profiles run pnpm with a fresh-release hold (`minimumReleaseAge`, 24 h here). Two consequences:
+
+- A version published minutes ago stays installable: pnpm exempts it and appends it to `minimumReleaseAgeExclude` in the profile's `pnpm-workspace.yaml`.
+- Every install first verifies the **whole** lockfile against that policy, and pnpm honours **only the first rule per package name** ([pnpm#732](https://github.com/pnpm/pnpm/issues/732)). If the file carries two rules for one name the second is ignored, and the profile is locked out of every installation until they are merged:
+
+  ```yaml
+  minimumReleaseAgeExclude:
+    - dsh-ide-git@0.18.4 || 0.18.5 || 0.18.6
+  ```
+
+  The plugin market merges duplicate rules automatically before its own runs; a hand-edited profile may need the merge. This is environment state, unrelated to `dsh-code-workspace`.
 
 ### ⚠️ `dsh-multi-folder` must be disabled
 
