@@ -27,8 +27,15 @@
  *
  * Usage:
  *   node tools/profile-link.mjs install   [--profile desktop] [--dry-run]
- *   node tools/profile-link.mjs uninstall [--profile desktop] [--dry-run]
+ *   node tools/profile-link.mjs uninstall [--profile desktop] [--package <name>] [--dry-run]
  *   node tools/profile-link.mjs status    [--profile desktop]
+ *
+ * `--package` names a DIFFERENT package to retire, which exists for one case: a
+ * superseded plugin whose whole job this one now does (`dsh-plugin-open-in-trae`,
+ * whose "Open In…" cell this plugin shadows at a lower priority). Retiring a
+ * foreign package is allowed only when the profile's dependency on it is a
+ * `link:` spec, so this script can never pull a registry package out from under
+ * pnpm's own bookkeeping.
  */
 
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync, cpSync } from 'node:fs'
@@ -40,9 +47,10 @@ const PACKAGE_NAME = 'dsh-code-workspace'
 const PLUGIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 function parseArgs(argv) {
-  const out = { command: argv[0], profile: 'desktop', dryRun: false }
+  const out = { command: argv[0], profile: 'desktop', package: PACKAGE_NAME, dryRun: false }
   for (let i = 1; i < argv.length; i += 1) {
     if (argv[i] === '--profile') out.profile = argv[++i]
+    else if (argv[i] === '--package') out.package = argv[++i]
     else if (argv[i] === '--dry-run') out.dryRun = true
     else if (argv[i] === '--help' || argv[i] === '-h') out.help = true
     else throw new Error('unknown argument: ' + argv[i])
@@ -52,14 +60,20 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2))
 if (args.help || !['install', 'uninstall', 'status'].includes(args.command)) {
-  console.log('usage: node tools/profile-link.mjs install|uninstall|status [--profile <name>] [--dry-run]')
+  console.log('usage: node tools/profile-link.mjs install|uninstall|status [--profile <name>] [--package <name>] [--dry-run]')
   process.exit(args.help ? 0 : 2)
 }
+if (args.command === 'install' && args.package !== PACKAGE_NAME) {
+  console.error('error: this script installs only ' + PACKAGE_NAME + '; use --package only with uninstall/status')
+  process.exit(2)
+}
 
+/** The package under this run: this plugin, or a superseded one being retired. */
+const TARGET_PACKAGE = args.package
 const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
 const profileDir = join(dshHome, 'profiles', args.profile)
 const packageJsonPath = join(profileDir, 'package.json')
-const linkPath = join(profileDir, 'node_modules', PACKAGE_NAME)
+const linkPath = join(profileDir, 'node_modules', TARGET_PACKAGE)
 
 function fail(message) {
   console.error('error: ' + message)
@@ -94,12 +108,13 @@ function currentLinkTarget() {
 
 function report() {
   const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
-  const dependency = pkg.dependencies ? pkg.dependencies[PACKAGE_NAME] : undefined
+  const dependency = pkg.dependencies ? pkg.dependencies[TARGET_PACKAGE] : undefined
   const bundles = (pkg.dsh && pkg.dsh.profile && pkg.dsh.profile.bundles) || []
   const link = currentLinkTarget()
+  console.log('package          ' + TARGET_PACKAGE)
   console.log('profile          ' + profileDir)
   console.log('dependency       ' + (dependency === undefined ? '(absent)' : dependency))
-  console.log('in bundles       ' + (bundles.includes(PACKAGE_NAME) ? 'yes' : 'no'))
+  console.log('in bundles       ' + (bundles.includes(TARGET_PACKAGE) ? 'yes' : 'no'))
   console.log(
     'node_modules     ' +
       (link.kind === 'junction'
@@ -110,6 +125,13 @@ function report() {
   )
   if (bundles.includes('dsh-multi-folder')) {
     console.log('WARNING          dsh-multi-folder is still in dsh.profile.bundles; both plugins intercept tools/execute. Remove it.')
+  }
+  if (TARGET_PACKAGE === PACKAGE_NAME && bundles.includes('dsh-plugin-open-in-trae')) {
+    console.log(
+      'NOTE             dsh-plugin-open-in-trae is still bundled. This plugin now renders the "Open In…" cell itself ' +
+        '(at a lower priority, so the two never collide), which makes that plugin redundant. Retire it with:\n' +
+        '                 node tools/profile-link.mjs uninstall --package dsh-plugin-open-in-trae',
+    )
   }
   return { pkg, dependency, bundles, link }
 }
@@ -135,7 +157,9 @@ if (args.command === 'install') {
   else if (link.kind === 'junction') changes.push('junction already correct')
   else changes.push(`create junction -> ${PLUGIN_DIR}`)
 
-  changes.forEach((change) => console.log('  would: ' + change))
+  // One label for both modes: a real run prints the plan and then its own
+  // confirmation lines, so "would:" would read as a lie next to "wrote …".
+  changes.forEach((change) => console.log('  plan: ' + change))
   if (args.dryRun) {
     console.log('\ndry run; nothing written')
     process.exit(0)
@@ -177,29 +201,52 @@ if (args.command === 'install') {
 }
 
 // ---- uninstall -------------------------------------------------------------
+// A foreign package is retired only when the profile LINKED it from disk. A
+// registry dependency belongs to pnpm: removing its `node_modules` entry by hand
+// would leave pnpm's own bookkeeping (and the store entry) behind, so that case
+// is refused and pointed at the plugin manager instead.
+if (TARGET_PACKAGE !== PACKAGE_NAME) {
+  if (dependency !== undefined && !String(dependency).startsWith('link:')) {
+    fail(`${TARGET_PACKAGE} is pinned as "${dependency}", not a link: spec; remove it with the plugin manager instead`)
+  }
+  if (dependency === undefined && link.kind === 'absent') {
+    console.log(TARGET_PACKAGE + ' is not installed in this profile; nothing to do.')
+    process.exit(0)
+  }
+}
+
 if (link.kind === 'junction') {
-  console.log('  would: remove junction ' + linkPath)
+  console.log('  plan: remove junction ' + linkPath)
 } else if (link.kind === 'directory') {
   fail(`${linkPath} is a real directory, not a junction; refusing to touch it`)
 }
-if (dependency !== undefined) console.log('  would: remove the dependency entry')
-if (bundles.includes(PACKAGE_NAME)) console.log('  would: remove the bundle entry')
+if (dependency !== undefined) console.log('  plan: remove the dependency entry')
+if (bundles.includes(TARGET_PACKAGE)) console.log('  plan: remove the bundle entry')
 
 if (args.dryRun) {
   console.log('\ndry run; nothing written')
   process.exit(0)
 }
 
+// Back up before the first write of this run, exactly as install does.
+if (dependency !== undefined || bundles.includes(TARGET_PACKAGE)) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const backupDir = join(profileDir, '.plugin-manager', `backup-${TARGET_PACKAGE}-${stamp}`)
+  mkdirSync(backupDir, { recursive: true })
+  cpSync(packageJsonPath, join(backupDir, 'package.json'))
+  console.log('backed up package.json to ' + backupDir)
+}
+
 if (link.kind === 'junction') {
   // Prove the target before removing: never walk out of the junction.
-  if (link.target !== resolve(PLUGIN_DIR)) {
+  if (TARGET_PACKAGE === PACKAGE_NAME && link.target !== resolve(PLUGIN_DIR)) {
     console.log(`note: the junction points at ${link.target}, not ${PLUGIN_DIR}; removing the link only.`)
   }
   rmSync(linkPath, { recursive: false, force: true })
   console.log('removed junction ' + linkPath)
 }
-if (dependency !== undefined) delete pkg.dependencies[PACKAGE_NAME]
-if (bundles.includes(PACKAGE_NAME)) pkg.dsh.profile.bundles = bundles.filter((name) => name !== PACKAGE_NAME)
+if (dependency !== undefined) delete pkg.dependencies[TARGET_PACKAGE]
+if (bundles.includes(TARGET_PACKAGE)) pkg.dsh.profile.bundles = bundles.filter((name) => name !== TARGET_PACKAGE)
 writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n')
 console.log('wrote ' + packageJsonPath)
 console.log('\nuninstalled. Restart the DSH backend to drop the row.')

@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh.md)
 
-> VS Code–compatible multi-root workspaces for DeepSeek Harness. A `.code-workspace` file is the single source of truth: its `folders` array becomes the session's writable roots, exactly as in VS Code, Trae and Cursor.
+> VS Code–compatible multi-root workspaces for DeepSeek Harness. A `.code-workspace` file is the single source of truth: its `folders` array becomes the session's writable roots, exactly as in VS Code, Trae and Cursor — and the same file is what "open in an editor" hands to the editor, so the window you look at shows the same folders the session writes to.
 
 Zero build step — `lib/index.js` is plain ESM for the Host, `lib/client.js` is a hand-written DSH client-modules factory bundle.
 
@@ -19,6 +19,7 @@ Zero build step — `lib/index.js` is plain ESM for the Host, `lib/client.js` is
 | Unknown members (`settings` / `extensions` / `launch` / `tasks` / `trae` / your own) | Preserved verbatim |
 | Extra keys inside one folder entry (newer VS Code writes an `icon`) | Preserved verbatim |
 | A multi-root window | Session `cwd` = the **directory holding the `.code-workspace` file**; every `folders[]` entry becomes an additional root |
+| Opening the window from Harness | The editor is launched with the `.code-workspace` file itself: `Code.exe <file>` / `Trae CN.exe <file>` — the VS Code family's own CLI contract for "open this multi-root workspace", which the shipped "Open In…" route cannot express (it validates a directory) |
 | A malformed workspace file | The panel shows the exact line/column; no roots are granted (fail closed) |
 
 A DSH workspace is a **single directory**, and `workspaceRegistry.create()` refuses anything that is not one, so opening a `.code-workspace` file means: register its directory as the DSH workspace, and treat the file's folders as extra writable roots.
@@ -64,6 +65,17 @@ The profile's `pnpm-workspace.yaml` carries a `minimumReleaseAgeExclude` list, w
 
 Both plugins listen on the `tools/execute` waterfall and re-root the sandbox. Running both means duplicate interception and duplicate prompt injection. Remove `"dsh-multi-folder"` from `dsh.profile.bundles` (the dependency itself can stay).
 
+### ⚠️ `dsh-plugin-open-in-trae` is superseded (and harmless meanwhile)
+
+That plugin adds Trae to the shipped "Open In…" menu by shadowing that control's cell. This plugin now does the same job for the whole VS Code family, at a **different priority**, so the two can coexist without colliding — this one renders, the other stays registered underneath. Running both is only redundant; retire the other one when you are ready:
+
+```bash
+node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-open-in-trae --dry-run
+node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-open-in-trae
+```
+
+A foreign package is retired only when the profile links it from disk (a `link:` dependency), so the script can never pull a registry package out from under pnpm. `status` now prints a note when the superseded plugin is still bundled.
+
 ---
 
 ## Usage
@@ -107,7 +119,31 @@ Opened from the session header button or the session-creation chip. It shows the
 - **Rename** — set `folders[].name`
 - **Remove**
 - **Show in file manager**
+- **Open in editor** — one button per VS Code-family editor found on the host (see below)
 - **Switch file** / **Recent** / **New workspace file** / **Unlink**
+
+### Opening the workspace in an editor
+
+Two entries, one behaviour: the editor opens the **workspace file**.
+
+| Entry | Where |
+| --- | --- |
+| **Panel section** | "Open in editor" in the panel: one button per editor this host can prove |
+| **"Open In…" menu** | The shipped session-header and file-tree control, which this plugin takes over (see below) |
+
+The family, in the order the panel offers it and the automatic choice follows it:
+
+`VS Code` · `VS Code Insiders` · `VSCodium` · `Cursor` · `Windsurf` · `Trae` / `Trae CN`
+
+- With a `.code-workspace` file associated, the launch is `<editor> <file.code-workspace>`: the multi-root window whose folders are exactly this session's roots. A workspace-file path argument is the family's own CLI contract, and it is precisely what the shipped "Open In…" route cannot express — that route validates an absolute **directory**, so every shipped VS Code entry can only ever open a single-folder window.
+- Without one, the container directory is opened instead. The button's tooltip names the executable and the target, so the fallback is visible before the click.
+- An editor is listed only when the file system proves it **twice**: the file exists, and its basename is still that member's own executable name (`Code.exe`, `Code - Insiders.exe`, `VSCodium.exe`, `Cursor.exe`, `Windsurf.exe`, `Trae.exe`, `Trae CN.exe`). Registry records and `PATH` supply candidates, never conclusions.
+- Windows is the full implementation: `App Paths`, uninstall records (`DisplayIcon`, then `InstallLocation`), `PATH`, then the conventional install directories. macOS and Linux use the CLI names on `PATH` plus the application bundles.
+- An SSH-reached session reports no editors at all: the browser's desktop is not the host's.
+
+**The "Open In…" takeover.** The shipped catalog is a compile-time table and its browser half filters ids through its own label map, so a deployment cannot add an editor to that menu from configuration. This plugin therefore registers the *same slot id* (`open-in-app`) on the two directory-scoped cells — `conversation.session.header.utilities` and `sidebar.right.tab.files.actions` — at **priority -2**. The slots ledger renders the lowest priority per id, so this cell wins while the shipped registration stays live underneath (dispose this plugin and the shipped control returns untouched) and `dsh-plugin-open-in-trae`'s -1 registration stays valid. Every other application keeps its shipped name, icon, route and behaviour; only the family ids are re-routed to this plugin's launcher, and `VSCodium`, `Trae`/`Trae CN` are added because the shipped catalog has no entries for them at all. If the shell does not publish the UI primitives the menu is drawn with, the takeover is skipped entirely and the shipped control stays in place.
+
+The remembered editor is stored per browser under `dsh.code-workspace.editor`; the keyboard shortcut the shipped plugin owns (`Ctrl+Alt+O`) is deliberately untouched.
 
 ### The `@` menu
 
@@ -145,8 +181,10 @@ Because a `.code-workspace` file decides which directories this session may writ
 | --- | --- | --- |
 | JSONC | `lib/jsonc.js` | Parse comments / trailing commas / BOM; **surgically** rewrite one top-level member and leave every other byte alone |
 | Workspace model | `lib/workspace-file.js` | VS Code path rules, folders add/remove/reorder/rename, serialization; pure functions, no fs |
-| Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery |
-| Client | `lib/client.js` | Session header button, session-creation dock chip, overlay panel, `@` companion group |
+| Editor family | `lib/editor.js` | Which VS Code-family editor this host holds (proved, never assumed), the child environment an Electron editor needs, and a launch whose success is decoupled from the editor's lifetime |
+| Editor icon | `lib/editor-icon.js` | One executable's associated icon for the family entries no shipped route serves; verified payload or nothing |
+| Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor endpoints |
+| Client | `lib/client.js` | Session header button, session-creation dock chip, overlay panel, the "Open In…" takeover, `@` companion group |
 
 - **Discovery**: the session cwd → a recorded file wins; otherwise a directory holding exactly one `.code-workspace` adopts it. Two or more candidates is ambiguous and grants nothing.
 - **Caching**: model 2 s, discovery 3 s, `@` index 4 s. `fs.stat` metadata is deliberately **not** used for invalidation — the fields an `FsInfo` carries are not part of the plugin-facing contract, so a stamp built from them could silently never change and pin a stale root set for a whole session. Panel and command reads always force a fresh parse.
@@ -162,18 +200,21 @@ Because a `.code-workspace` file decides which directories this session may writ
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-Four files, 103 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
+Five files, 137 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
 
 ```bash
 node test/jsonc.test.mjs            # JSONC parsing and comment-preserving rewrites
 node test/workspace-file.test.mjs   # VS Code path rules, folders CRUD
-node test/host.test.mjs             # discovery, re-rooting, refusals, command, remote API, @ discovery
-node test/client.test.mjs           # bundle contract, slot registrations, panel interaction, @ source
+node test/host.test.mjs             # discovery, re-rooting, refusals, command, remote API, @ discovery, editor guards
+node test/client.test.mjs           # bundle contract, slot registrations, panel interaction, Open In… takeover, @ source
+node test/editor.test.mjs           # family resolution, proof-before-launch, child environment, launch outcomes, icons
 ```
+
+Nothing in the editor tests launches an editor: the resolver's registry, `PATH` and file probes are injected, and `launchEditor` is handed a child-process double.
 
 ### Live verification
 
-`tools/verify-instance.mjs` checks a **really booted** DSH instance end to end (index injection, whether the client bundle is served, the `codeWorkspace/*` endpoints, and a folders write-back through the real sandbox with comment preservation):
+`tools/verify-instance.mjs` checks a **really booted** DSH instance end to end (index injection, whether the client bundle is served — including the "Open In…" takeover markers, the `codeWorkspace/*` endpoints and the two editor refusals an unknown id must hit, and a folders write-back through the real sandbox with comment preservation):
 
 ```bash
 # a throwaway profile, so your desktop profile is never touched
@@ -183,7 +224,7 @@ dsh --profile cwsverify --port 0 --no-open
 node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
-On `0.2.0-rc.2` this script passes 25/25.
+Measured on `0.2.0-rc.2`: **30/30** — the 25 checks it made before the editor feature, plus the five added with it (the served bundle carries the takeover, `codeWorkspace/editors` answers the family, and the two refusals an unknown id must hit). It never launches an editor: both editor calls it makes are refusals by construction.
 
 ---
 
@@ -195,9 +236,11 @@ On `0.2.0-rc.2` this script passes 25/25.
 | `lib/client.js` | Client factory bundle |
 | `lib/jsonc.js` | JSONC reader + comment-preserving writer |
 | `lib/workspace-file.js` | `.code-workspace` model and path rules |
+| `lib/editor.js` | VS Code-family discovery, child environment, launch |
+| `lib/editor-icon.js` | Executable icon extraction for the family entries without a shipped icon route |
 | `cordis.patch.yml` | Profile patch layer inserting the `dsh-code-workspace` row |
 | `test/` | Behaviour tests, no DSH runtime |
-| `tools/profile-link.mjs` | Link / unlink the plugin into a DSH profile without pnpm |
+| `tools/profile-link.mjs` | Link / unlink the plugin into a DSH profile without pnpm; `--package` retires a superseded one |
 | `tools/verify-instance.mjs` | End-to-end checks against a live instance |
 | `tools/probe-index.mjs` | Dump one instance's index and report bundle injection |
 | `docs/client-contract.md` | The DSH 0.2.0-rc.2 client-plugin contract, citation-anchored |

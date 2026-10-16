@@ -257,14 +257,16 @@ test('apply registers the prompt section, the command, the service and the remot
   assert.deepEqual(methods, [
     'state', 'recent', 'open', 'forget', 'useFile', 'create',
     'addFolder', 'removeFolder', 'renameFolder', 'moveFolder',
-    'browse', 'makeDir', 'pick', 'reveal', 'listFiles',
+    'browse', 'makeDir', 'pick', 'reveal', 'editors', 'editorIcon',
+    'openInEditor', 'listFiles',
   ])
   for (const invocation of b.remoteContribution.invocations) {
     assert.equal(invocation.service, 'codeWorkspace')
     assert.equal(invocation.invocation.kind, 'direct')
     assert.equal(invocation.result.mode, 'src-json')
   }
-  assert.deepEqual(b.remoteContribution.invocations.at(-3).cancellation, { parameter: 'signal' })
+  const pick = b.remoteContribution.invocations.find((i) => i.method === 'pick')
+  assert.deepEqual(pick.cancellation, { parameter: 'signal' })
 })
 
 test('a directory holding one .code-workspace file adopts it, and the prompt lists the folders', async () => {
@@ -733,4 +735,77 @@ test('makeDir creates exactly one segment and refuses traversal', async () => {
 test('the pick API reports unavailability instead of opening a host dialog', async () => {
   const b = boot({ files: BASE_FILES, services: { directoryPicker: undefined } })
   assert.deepEqual(await b.api.pick('D:/ws'), { path: null, via: 'unavailable' })
+})
+
+// ------------------------------------------------------- open in an editor
+// The family resolution itself is covered offline in `editor.test.mjs` against an
+// injected registry, PATH and file set. What is asserted here is the host's own
+// contract: the envelope the panel and the menu read, and the guards that must
+// hold on EVERY machine, before any editor is looked for.
+
+test('the editors endpoint reports the family envelope the panel and the menu read', async () => {
+  const b = boot({ files: BASE_FILES })
+  const value = await b.api.editors()
+  assert.equal(value.platform, process.platform)
+  assert.equal(typeof value.ssh, 'boolean')
+  assert.ok(Array.isArray(value.editors))
+  if (value.editors.length === 0) {
+    assert.equal(value.preferred, null)
+  } else {
+    assert.equal(value.preferred, value.editors[0].id)
+    assert.equal(new Set(value.editors.map((entry) => entry.id)).size, value.editors.length)
+  }
+  for (const editor of value.editors) {
+    assert.equal(typeof editor.id, 'string')
+    assert.equal(typeof editor.label, 'string')
+    assert.equal(typeof editor.executable, 'string')
+    assert.equal(typeof editor.source, 'string')
+  }
+})
+
+test('an icon request may only name a family member this host actually detected', async () => {
+  const b = boot({ files: BASE_FILES })
+  await assert.rejects(() => b.api.editorIcon('not-an-editor'), /unknown editor/)
+  await assert.rejects(() => b.api.editorIcon(undefined), /unknown editor/)
+  const detected = (await b.api.editors()).editors
+  if (detected.length === 0) return
+  const value = await b.api.editorIcon(detected[0].id)
+  assert.equal(value.id, detected[0].id)
+  assert.ok(value.dataUrl === null || value.dataUrl.startsWith('data:image/png;base64,'))
+})
+
+test('a session reached over SSH refuses to open an editor before it looks for one', async () => {
+  const b = boot({ files: BASE_FILES })
+  const previous = process.env.SSH_CONNECTION
+  process.env.SSH_CONNECTION = '10.0.0.1 22 10.0.0.2 51000'
+  try {
+    // The refusal is checked first, so it holds whatever this machine has
+    // installed — including nothing.
+    await assert.rejects(() => b.api.openInEditor('D:/ws', 'vscode'), /SSH/)
+    const value = await b.api.editors()
+    assert.equal(value.ssh, true)
+    assert.deepEqual(value.editors, [], 'an SSH session has no desktop to open an editor on')
+  } finally {
+    if (previous === undefined) delete process.env.SSH_CONNECTION
+    else process.env.SSH_CONNECTION = previous
+  }
+})
+
+test('an editor id this host does not have is refused, never launched', async () => {
+  const b = boot({ files: BASE_FILES })
+  const detected = (await b.api.editors()).editors
+  const absent = ['vscode', 'vscodeinsiders', 'vscodium', 'cursor', 'windsurf', 'trae'].find(
+    (id) => !detected.some((entry) => entry.id === id),
+  )
+  if (absent === undefined) return
+  await assert.rejects(() => b.api.openInEditor('D:/ws', absent), /no VS Code family editor|is not available/)
+})
+
+test('opening in an editor refuses a directory that does not exist', async () => {
+  const b = boot({ files: BASE_FILES })
+  // Only reachable when this host has an editor at all; the guard order is what
+  // is being pinned, and it must not depend on the machine's installs.
+  const detected = (await b.api.editors()).editors
+  if (detected.length === 0) return
+  await assert.rejects(() => b.api.openInEditor('D:/nowhere-here', detected[0].id), /does not exist/)
 })

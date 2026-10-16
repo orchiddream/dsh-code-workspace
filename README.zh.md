@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-> 为 DeepSeek Harness 提供与 VS Code / Trae / Cursor 相同的**多根工作区**：一个 `.code-workspace` 文件就是唯一事实来源，它的 `folders` 数组成为本次会话的可写根。
+> 为 DeepSeek Harness 提供与 VS Code / Trae / Cursor 相同的**多根工作区**：一个 `.code-workspace` 文件就是唯一事实来源，它的 `folders` 数组成为本次会话的可写根；「在编辑器中打开」递给编辑器的也是同一个文件，所以你看到的窗口与会话能写的目录是同一批。
 
 零构建步骤：`lib/index.js` 是纯 ESM 宿主插件，`lib/client.js` 是手写的 DSH client-modules factory bundle。
 
@@ -19,6 +19,7 @@
 | 未知成员（`settings` / `extensions` / `launch` / `tasks` / `trae` / 自定义） | 原样保留，不会被丢弃 |
 | 文件夹条目里的额外键（如新版的 `icon`） | 原样保留 |
 | 多根窗口 | 会话 `cwd` = **`.code-workspace` 文件所在目录**（容器目录）；`folders[]` 全部作为附加根 |
+| 从 Harness 打开窗口 | 用 `.code-workspace` 文件本身启动编辑器：`Code.exe <文件>` / `Trae CN.exe <文件>`，这正是 VS Code 家族「打开这个多根工作区」的 CLI 约定；官方「Open In…」路由做不到——它只接受**目录** |
 | `.code-workspace` 损坏 | 面板显示具体行列号；此时不授予任何根（fail closed） |
 
 DSH 的工作区是**单根目录**，`workspaceRegistry.create()` 也只接受存在的目录，所以映射方式是：打开一个 `.code-workspace` 文件 = 把它的所在目录注册为 DSH 工作区，文件里的 folders 变成附加可写根。
@@ -65,6 +66,17 @@ profile 的 `pnpm-workspace.yaml` 启用了 `minimumReleaseAgeExclude`，说明�
 
 两个插件都会监听 `tools/execute` 瀑布并重根沙箱。同时启用会造成重复拦截与重复的提示词注入。从 profile `package.json` 的 `dsh.profile.bundles` 里移除 `"dsh-multi-folder"` 即可（依赖可以保留）。
 
+### ⚠️ `dsh-plugin-open-in-trae` 已被本插件取代（同时装着也无害）
+
+那个插件靠遮蔽官方「Open In…」控件来加 Trae 一项，本插件现在对整个 VS Code 家族做同一件事，且登记在**不同的 priority** 上，所以两者可以共存、不会撞车——本插件渲染，它留在账本底下。同时装着只是冗余，随时可以退掉：
+
+```bash
+node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-open-in-trae --dry-run
+node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-open-in-trae
+```
+
+只有 profile 以 `link:` 方式从磁盘挂载的包才允许这样退掉，所以脚本不可能把 pnpm 管理的注册表包从它的记账体系里抠出来。`status` 会在该插件仍在 bundles 里时给出提示。
+
 ---
 
 ## 使用
@@ -108,7 +120,31 @@ profile 的 `pnpm-workspace.yaml` 启用了 `minimumReleaseAgeExclude`，说明�
 - **重命名**：设置 `folders[].name`
 - **移除**
 - **在资源管理器中显示**
+- **在编辑器中打开**：本机能证明存在的每个 VS Code 家族编辑器一个按钮（见下）
 - **切换文件** / **最近使用** / **新建工作区文件** / **取消关联**
+
+### 在编辑器中打开工作区
+
+两个入口，同一种行为：编辑器打开的是**工作区文件**。
+
+| 入口 | 位置 |
+| --- | --- |
+| **面板** | 面板里的「在编辑器中打开」：本机能证明存在的编辑器各一个按钮 |
+| **「Open In…」菜单** | 官方会话头部 / 文件树控件，由本插件接管（见下） |
+
+家族成员，按面板显示顺序（也就是自动选择的顺序）：
+
+`VS Code` · `VS Code Insiders` · `VSCodium` · `Cursor` · `Windsurf` · `Trae` / `Trae CN`
+
+- 已关联 `.code-workspace` 文件时，启动方式是 `<编辑器> <文件.code-workspace>`：打开的多根窗口里的目录，正是本会话的根集合。把工作区文件作为参数是 VS Code 家族自己的 CLI 约定，而这恰恰是官方「Open In…」路由表达不了的——它只接受绝对**目录**，所以官方那几个 VS Code 条目永远只能开出单文件夹窗口。
+- 没有关联文件时退回打开容器目录。按钮的 tooltip 会写明可执行文件与目标，所以点之前就能看到这种降级。
+- 只有**被文件系统证明两次**的编辑器才会被列出：文件真实存在，且文件名仍然属于该成员（`Code.exe`、`Code - Insiders.exe`、`VSCodium.exe`、`Cursor.exe`、`Windsurf.exe`、`Trae.exe`、`Trae CN.exe`）。注册表与 `PATH` 只提供候选，不下结论。
+- Windows 是完整实现：`App Paths` → 卸载记录（`DisplayIcon`，其次 `InstallLocation`）→ `PATH` → 常见安装目录。macOS / Linux 走 `PATH` 上的 CLI 名称 + 应用包。
+- 经 SSH 连进来的会话报告「没有编辑器」：浏览器那一端不是主机。
+
+**接管官方「Open In…」控件。** 官方目录是编译期写死的表，浏览器半边还有自己的 id→文案映射，所以部署无法通过配置往那个菜单加编辑器。因此本插件在两个目录作用域的格子上登记**同一个 slot id**（`open-in-app`）——`conversation.session.header.utilities` 与 `sidebar.right.tab.files.actions`——priority 用 **-2**。槽位账本对同 id 只渲染 priority 最低的那条，所以本插件胜出，而官方注册仍活在底下（停用本插件，官方控件原样回来），`dsh-plugin-open-in-trae` 的 -1 也依然合法。其余应用的名字、图标、路由与行为全部保持官方实现；只有家族成员被改派到本插件的启动器，而 `VSCodium`、`Trae` / `Trae CN` 是官方目录里根本没有的条目。若 shell 没有提供绘制菜单所需的 UI primitives，接管整体跳过，官方控件保持不动。
+
+记住的选择存在浏览器本地键 `dsh.code-workspace.editor`；官方插件拥有的快捷键（`Ctrl+Alt+O`）刻意不动。
 
 ### `@` 文件菜单
 
@@ -146,13 +182,16 @@ DSH 沙箱（Windows ACL runner）为每个进程树只授予**一个**工作区
 | --- | --- | --- |
 | JSONC | `lib/jsonc.js` | 解析注释/尾逗号/BOM；**外科式**改写单个顶层成员，其余字节不动 |
 | 工作区模型 | `lib/workspace-file.js` | VS Code 路径规则、folders 增删改序重命名、序列化；纯函数，无 fs |
-| 宿主 | `lib/index.js` | 发现与缓存、`tools/execute` 重根拦截、提示词注入、通知、`/code-workspace` 命令、无会话 `codeWorkspace/*` 远程 API、`@` 发现 |
-| 客户端 | `lib/client.js` | 会话头部按钮、新建会话页 dock 胶囊、浮层面板、`@` 同伴分组 |
+| 编辑器家族 | `lib/editor.js` | 本机装了哪些 VS Code 家族编辑器（一律先证明、不假设）、Electron 编辑器需要的子进程环境、以及「启动成功」与「编辑器存活」解耦的启动逻辑 |
+| 编辑器图标 | `lib/editor-icon.js` | 官方没有图标路由的家族成员，从可执行文件提取关联图标；产物校验不通过就当作没有 |
+| 宿主 | `lib/index.js` | 发现与缓存、`tools/execute` 重根拦截、提示词注入、通知、`/code-workspace` 命令、无会话 `codeWorkspace/*` 远程 API、`@` 发现、编辑器端点 |
+| 客户端 | `lib/client.js` | 会话头部按钮、新建会话页 dock 胶囊、浮层面板、「Open In…」接管、`@` 同伴分组 |
 
 - **发现**：会话 cwd 目录 → 已记录的文件（指针）优先，否则「恰好一个 `.code-workspace`」自动采用；两个及以上视为歧义，不生效。
 - **缓存**：模型 2s、目录发现 3s、`@` 索引 4s。刻意**不用 `fs.stat` 元数据**做失效判断——`FsInfo` 的字段不属于插件面向的契约，用不靠谱的字段做戳可能永远不变化，把根集合钉死整个会话。面板与命令的读取一律强制重读。
 - **拦截**：`write` / `edit` / `pwsh` / `bash` 的目标落在附加根内时，用 `{ ...standingPolicy, workspaceRoot: <该根> }` 直接执行，**不改 mode**，所以 `read-only` 依旧拒绝、`workspace-write` 放行、`danger-full-access` 放行。后台命令按同样策略注册到 `ctx.jobs`。
 - **无会话通道**：`ctx.provide('codeWorkspace', api)` + 手写 `src-json` Typert 描述符，按**路径**而非 session id 取参，所以还没有会话的新建会话页也能读写工作区文件。
+- **打开编辑器**：`codeWorkspace/editors` 报告本机能证明的家族（懒解析一次并缓存，SSH 会话直接判空）；`codeWorkspace/openInEditor` 取会话目录、解析出该目录的工作区文件，然后以 `<编辑器> <文件>`（没有文件时退回 `<编辑器> <目录>`）detached 启动。图标经 `codeWorkspace/editorIcon` 以 data URL 内联返回，因此本插件不需要自己的 HTTP 路由，也就不必再引入 `webServer` / `connection` 依赖。
 - 配置/指针存储在 `<DSH_HOME>/storages/code-workspace/index.json`（在 Agent 沙箱之外，且被写保护）。
 
 ---
@@ -163,18 +202,21 @@ DSH 沙箱（Windows ACL runner）为每个进程树只授予**一个**工作区
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-四个测试文件，共 103 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`，客户端用最小 React shim（hook 单次求值 + 递归展开函数组件），所以可以直接检查渲染树并模拟点击。
+五个测试文件，共 137 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入），客户端用最小 React shim（hook 单次求值 + 递归展开函数组件），所以可以直接检查渲染树并模拟点击。
 
 ```bash
 node test/jsonc.test.mjs            # JSONC 解析与注释保留改写
 node test/workspace-file.test.mjs   # VS Code 路径规则与 folders 增删改
-node test/host.test.mjs             # 发现、拦截重根、拒绝、命令、远程 API、@ 发现
-node test/client.test.mjs           # bundle 契约、槽位注册、面板交互、@ 源
+node test/host.test.mjs             # 发现、拦截重根、拒绝、命令、远程 API、@ 发现、编辑器守卫
+node test/client.test.mjs           # bundle 契约、槽位注册、面板交互、Open In… 接管、@ 源
+node test/editor.test.mjs           # 家族解析、先证明再启动、子进程环境、启动结果、图标
 ```
+
+编辑器相关测试不会启动任何编辑器：解析器的注册表 / `PATH` / 文件探针全部注入，`launchEditor` 拿到的是子进程替身。
 
 ### 实机验证
 
-`tools/verify-instance.mjs` 可以对一个**真实启动的** DSH 实例做端到端校验（索引注入、客户端 bundle 是否被服务、`codeWorkspace/*` 端点、以及真实沙箱下 folders 写回与注释保留）：
+`tools/verify-instance.mjs` 可以对一个**真实启动的** DSH 实例做端到端校验（索引注入、客户端 bundle 是否被服务——含「Open In…」接管标记、`codeWorkspace/*` 端点、未知 id 必须撞上的两条编辑器拒绝，以及真实沙箱下 folders 写回与注释保留）：
 
 ```bash
 # 用一个一次性 profile，不碰你的 desktop profile
@@ -184,7 +226,7 @@ dsh --profile cwsverify --port 0 --no-open
 node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
-本机 `0.2.0-rc.2` 上该脚本 25/25 全通过。
+本机 `0.2.0-rc.2` 实测 **30/30**：编辑器功能加入前的 25 项，加上随它新增的 5 项（bundle 里带上了接管、`codeWorkspace/editors` 答出家族、未知 id 必须撞上的两条拒绝）。脚本不会启动任何编辑器——它发的两次编辑器调用按构造都是拒绝。
 
 ---
 
@@ -196,9 +238,11 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 | `lib/client.js` | 客户端 factory bundle |
 | `lib/jsonc.js` | JSONC 解析 + 注释保留改写 |
 | `lib/workspace-file.js` | `.code-workspace` 模型与路径规则 |
+| `lib/editor.js` | VS Code 家族识别、子进程环境、启动 |
+| `lib/editor-icon.js` | 官方无图标路由的家族成员：可执行文件图标提取 |
 | `cordis.patch.yml` | profile patch 层，插入 `dsh-code-workspace` 行 |
 | `test/` | 无需 DSH 运行时的行为测试 |
-| `tools/profile-link.mjs` | 不经过 pnpm 把插件挂载进 / 卸载出 DSH profile |
+| `tools/profile-link.mjs` | 不经过 pnpm 把插件挂载进 / 卸载出 DSH profile；`--package` 可退掉被取代的插件 |
 | `tools/verify-instance.mjs` | 真实实例端到端校验 |
 | `tools/probe-index.mjs` | 导出一个实例的索引，检查 bundle 注入 |
 | `docs/client-contract.md` | DSH 0.2.0-rc.2 客户端插件契约（逐条带行号出处） |

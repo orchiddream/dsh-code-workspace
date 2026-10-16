@@ -8,9 +8,15 @@
  *
  *   1. the client bundle is part of the boot graph the index injects;
  *   2. the served bundle really is this package's factory (right id, right
- *      exports), which is what makes the client half load in a browser;
+ *      exports, and both the `@` source and the "Open In…" takeover present),
+ *      which is what makes the client half load in a browser;
  *   3. the sessionless `/api` route answers `codeWorkspace/*`, which is the only
- *      transport the session-creation page has.
+ *      transport the session-creation page has — including the editor family and
+ *      the two refusals (an unknown icon id, an unknown editor) that must hold on
+ *      every machine.
+ *
+ * Nothing here launches an editor: the two editor calls it makes are refusals by
+ * construction, so running this against a live Harness cannot open a window.
  *
  * The index fence is a launch-token → signed-cookie exchange, and `fetch`
  * follows the 303 without keeping the cookie, so the redirect is handled
@@ -68,6 +74,11 @@ if (scriptTag) {
     code.includes('conversation.input.dock') && code.includes('conversation.session.header.actions') && code.includes('shell.overlay'),
   )
   record('the served bundle carries the @ companion source', code.includes('registerSource') && code.includes('codeWorkspace/listFiles'))
+  record(
+    'the served bundle carries the Open In… takeover on both shipped cells',
+    code.includes('conversation.session.header.utilities') && code.includes('sidebar.right.tab.files.actions') && code.includes('open-in-app') && code.includes('MENU_PRIORITY'),
+    'the priority VALUE is pinned by test/client.test.mjs; this only proves the takeover shipped',
+  )
 } else {
   record('the index exposes a fetchable client bundle url', false, 'no script src matched')
 }
@@ -95,6 +106,29 @@ async function rpc(endpoint, args, rpcId) {
 const recent = await rpc('codeWorkspace/recent', {}, 'verify-recent')
 record('POST /api/codeWorkspace/recent is routed', recent.status === 200, 'status ' + recent.status)
 record('recent answers with the plugin\'s own shape', recent.ok && Array.isArray(recent.value.files), recent.text.slice(0, 200))
+
+// 3b. the editor family, and the two refusals that must hold on every machine --
+const editors = await rpc('codeWorkspace/editors', {}, 'verify-editors')
+record('POST /api/codeWorkspace/editors is routed', editors.status === 200, 'status ' + editors.status)
+record(
+  'editors answers the envelope the panel and the menu read',
+  editors.ok && Array.isArray(editors.value.editors) && typeof editors.value.ssh === 'boolean' && typeof editors.value.platform === 'string',
+  editors.ok ? JSON.stringify({ count: editors.value.editors.length, preferred: editors.value.preferred, ssh: editors.value.ssh }) : editors.text.slice(0, 200),
+)
+
+const badIcon = await rpc('codeWorkspace/editorIcon', { id: 'not-an-editor' }, 'verify-icon-refused')
+record(
+  'editorIcon refuses an id that is not a family member',
+  badIcon.ok === false && /unknown editor/.test(badIcon.text),
+  badIcon.text.slice(0, 200),
+)
+
+const badOpen = await rpc('codeWorkspace/openInEditor', { containerDir: 'D:/kjsjs/deepseek', editorId: 'not-an-editor' }, 'verify-open-refused')
+record(
+  'openInEditor refuses an unknown editor instead of launching anything',
+  badOpen.ok === false && /no VS Code family editor|is not available/.test(badOpen.text),
+  badOpen.text.slice(0, 200),
+)
 
 const state = await rpc('codeWorkspace/state', { containerDir: 'D:/kjsjs/deepseek' }, 'verify-state')
 record('POST /api/codeWorkspace/state is routed', state.status === 200, 'status ' + state.status)

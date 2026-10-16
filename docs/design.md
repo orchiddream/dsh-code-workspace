@@ -39,8 +39,10 @@ Consequences that follow from this and are not bugs:
 | --- | --- | --- |
 | Text | `lib/jsonc.js` | JSONC reader; **surgical** single-member writer |
 | Model | `lib/workspace-file.js` | VS Code path rules, folders CRUD, serialization. Pure, no fs |
-| Host | `lib/index.js` | Discovery, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery |
-| Client | `lib/client.js` | Session header button, session-creation dock chip, overlay panel, `@` companion group |
+| Editor family | `lib/editor.js` | Which VS Code-family editor this host holds, the child environment, the launch |
+| Editor icon | `lib/editor-icon.js` | Associated-icon extraction for the family entries no shipped route serves |
+| Host | `lib/index.js` | Discovery, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor endpoints |
+| Client | `lib/client.js` | Session header button, session-creation dock chip, overlay panel, "Open In…" takeover, `@` companion group |
 
 ## Why the writer is surgical
 
@@ -194,8 +196,91 @@ platform. The sandbox root handed to the policy is different: it is whatever the
 seam reported (`fs.processPath`), captured per folder at load time, because that is the
 spelling the sandbox layer itself produced.
 
-## `@` discovery
+## Opening the workspace in an editor
 
+The requirement is narrower than "open a folder": the editor's window must be the
+same root set the session writes to, and the only way to get that from the VS Code
+family CLI is to hand it the **workspace file** — `Code.exe <file.code-workspace>`,
+`Trae CN.exe <file.code-workspace>`. So the target is the file, and the container
+directory is only the fallback for a session that has none (or whose recorded file
+is gone, which the panel already marks as missing).
+
+### Why the shipped control cannot do it, and why the takeover is -2
+
+The shipped catalog (`@deepseek-ai/dsh-host-open-in-app`, `OPEN_IN_APP_CATALOG`) is
+a compile-time table, its browser half filters ids through a matching
+`APP_LABEL_KEY` map, and `POST /open-in-app/open` validates an absolute
+**directory**. A deployment therefore cannot add an editor to that menu from
+configuration, and cannot make any existing entry pass a file. Taking over the cell
+that renders it is the only supported route, and the slots ledger makes that a
+supported move rather than a hack: a `list` slot keeps one cell per id, the entry
+with the LOWEST priority renders, and registering the same id at the SAME priority
+throws.
+
+`dsh-plugin-open-in-trae` took that cell at `priority: -1`. This plugin takes it at
+**-2**, and that difference is deliberately load-bearing: `-1` and `0` stay
+registered and valid (same id, different priority — no collision), this plugin
+renders, and retiring the other plugin later is cleanup rather than a prerequisite.
+Presentationally only the two directory-scoped cells are taken
+(`conversation.session.header.utilities`, `sidebar.right.tab.files.actions`); the
+four file-scoped `open-in-app` cells are about opening individual files and are left
+alone. Every non-family application keeps its shipped name, icon, route and
+behaviour; family ids are re-routed to this plugin's launcher, and VSCodium,
+Trae/Trae CN are added because the shipped catalog has no entries for them.
+
+### Proof, not conclusion
+
+A VS Code fork installs wherever the user chose and only some of them register
+`App Paths` (Trae, on the machine this was written against, is at `D:\app\Trae CN\`
+with nothing but an uninstall record). So each source yields *candidates* and every
+candidate must pass two proofs: the file exists, and its basename is still that
+member's own executable name. A registry record — which any installer can write —
+therefore cannot point the launcher at an unrelated program. The chain is
+`App Paths` → uninstall records (`DisplayIcon`, then `InstallLocation`) → `PATH` →
+conventional directories on Windows, and CLI names plus application bundles
+elsewhere. `resolveEditors` takes its platform, environment, registry reader, `PATH`
+lookup and file probe as options, so the whole chain is testable as pure decisions.
+
+### Two traps the launch module exists to handle
+
+**`ELECTRON_RUN_AS_NODE`.** The Harness runs as a Node-mode Electron child, so that
+marker is in this process's environment. Any Electron application spawned with it
+set starts as plain Node, prints nothing and exits 0 — an editor launched that way
+never opens a window while the launcher reads a success. Every child environment is
+scrubbed of the marker, of this Harness's identity and credentials (`DSH_*`,
+`*KEY*`/`*TOKEN*`/`*SECRET*`/`*PASSWORD*`), and of `NODE_OPTIONS`.
+
+**Launch success is not process lifetime.** A GUI editor stays in the foreground for
+as long as its window lives, and a second launch delegates to the running instance
+and exits 0. `launchEditor` resolves from a short watch window: a spawn rejection
+(`ENOENT` → `missing`) or an early nonzero exit is a failure; a child still running
+at the end is unrefed and counted launched. A `missing` outcome re-resolves the
+family once and retries, so an editor that was uninstalled or moved mid-session
+recovers instead of failing forever.
+
+### Icons over the channel that already exists
+
+The shipped applications keep their shipped icon route. For the additions, the icon
+is extracted from the executable (PowerShell `ExtractAssociatedIcon`, the same 32px
+ceiling the shipped launcher documents), verified as a PNG of plausible size — the
+API answers a generic document icon and exits 0 for a non-executable source — and
+returned as an **`image/png` data URL** over the existing remote channel. That is a
+deliberate trade: no new HTTP routes, no `webServer`/`connection` dependency, no
+second trust fence to keep in step, at the cost of a few KB per detected editor,
+cached for the plugin's life.
+
+### Failure posture
+
+- No detections (or an SSH-reached session) → the endpoint answers an empty family
+  and the panel says why. Nothing is guessed and nothing is launched.
+- The UI primitives the menu is drawn with are loaded through an optional
+  `require`: without them the takeover is skipped and the shipped control stays, so
+  a missing seed module can never take the panel, the dock chip or the `@` group
+  down with it.
+- A family id the client names that this host cannot prove is refused; the client
+  can never hand the host an arbitrary executable path.
+
+## `@` discovery
 DSH's `@` provider builds exactly one searcher from the session cwd and refuses every
 candidate outside it, so an additional root is unreachable through it. The plugin does
 not touch that provider; it publishes `codeWorkspace/listFiles` over the files it
@@ -267,19 +352,40 @@ one `dsh-multi-folder` carries for its config file.
 - **The pnpm lockfile policy can block installation** on a profile that enables
   `minimumReleaseAge` and carries a recently published dependency. Unrelated to this
   plugin; the README documents the manual `link:` procedure.
+- **The "Open In…" takeover rests on upstream slot ids.** It is registered against
+  `conversation.session.header.utilities` and `sidebar.right.tab.files.actions` with
+  id `open-in-app`; if a future shell renames either, the takeover is simply not
+  rendered (the shipped control stays, and the panel buttons keep working). It also
+  depends on the shipped locale namespace for its names: an application id that
+  namespace does not name stays out of the list, exactly as the shipped control
+  drops it.
+- **No editor is configurable.** An exotic install that registers neither an
+  `App Paths` entry nor an uninstall record, and that lies outside the conventional
+  directories, will not be listed. Widening that means a config field (the previous
+  `dsh-plugin-open-in-trae` had one); the family list is chosen over a config knob
+  for now.
+- **Icons for the added family members are 32px.** `ExtractAssociatedIcon` is the
+  stock .NET ceiling; the shipped launcher documents the same limit. A sharper icon
+  would need PE resource parsing rather than the associated-icon API.
+- **Editor detection off Windows is PATH and bundle based.** Windows is the full
+  implementation (registry plus conventional directories).
 
 ## Tests
 
 `test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (22), `test/host.test.mjs`
-(38) and `test/client.test.mjs` (18) run with no DSH runtime. The host tests use a fake
-`fs` seam, `systemPrompt`, `commands` registry and `shell`/`jobs`; the client test uses
-a minimal React shim whose hooks resolve once per call, which turns every component
-into a plain function whose element tree can be inspected and whose buttons can be
-clicked.
+(43), `test/client.test.mjs` (25) and `test/editor.test.mjs` (22) run with no DSH
+runtime. The host tests use a fake `fs` seam, `systemPrompt`, `commands` registry and
+`shell`/`jobs`; the editor tests inject the platform, environment, registry reader,
+`PATH` lookup and file probe, and hand `launchEditor` a child-process double, so a test
+run never starts an editor. The client test uses a minimal React shim whose hooks
+resolve once per call, which turns every component into a plain function whose element
+tree can be inspected and whose buttons can be clicked.
 
 `tools/verify-instance.mjs` is the live counterpart: against a really booted throwaway
 profile it checks the index injection, that the served client bundle registers this
-package's factory with all three slot surfaces and the `@` source, that the
-`codeWorkspace/*` endpoints answer, that `state` resolves a real `.code-workspace`
-sample with its three folders, and that a folders write-back through the real
-sandboxed `fs` seam preserves comments and untouched members.
+package's factory with all three slot surfaces, the `@` source and the "Open In…"
+takeover, that the `codeWorkspace/*` endpoints answer — including the two editor
+refusals an unknown id must hit, neither of which launches anything — that `state`
+resolves a real `.code-workspace` sample with its three folders, and that a folders
+write-back through the real sandboxed `fs` seam preserves comments and untouched
+members.

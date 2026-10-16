@@ -56,6 +56,50 @@ const reactShim = {
 }
 const CLEANUPS = []
 
+// --------------------------------------------------- shipped routes and widgets
+// The menu takeover reads the shipped applications and posts the shipped launch,
+// so the two shipped HTTP routes are stubbed for this whole file. The UI
+// primitives it draws with are platform seed modules; the stub below renders the
+// same data as plain host elements, which is what lets a test inspect the menu
+// and click it.
+
+const shippedRoutes = { apps: [], appsOk: true, openLog: [], openOk: true }
+
+globalThis.fetch = (input, init = {}) => {
+  const url = String(input)
+  if (url === 'open-in-app/apps') {
+    return Promise.resolve(shippedRoutes.appsOk
+      ? { ok: true, status: 200, json: () => Promise.resolve({ apps: shippedRoutes.apps }) }
+      : { ok: false, status: 500, json: () => Promise.resolve({}) })
+  }
+  if (url === 'open-in-app/open') {
+    shippedRoutes.openLog.push(JSON.parse(String(init.body)))
+    return Promise.resolve({ ok: shippedRoutes.openOk, status: shippedRoutes.openOk ? 200 : 502, json: () => Promise.resolve({}) })
+  }
+  return Promise.reject(new Error('unexpected fetch: ' + url))
+}
+
+/** The primitives the takeover needs, rendered as inspectable host elements. */
+const primitivesStub = {
+  Menu: (props) => reactShim.createElement('div', { 'data-menu': props.className }, [
+    props.anchor,
+    reactShim.createElement('div', { 'data-menu-open': props.open === true }, (props.items || []).map((item) =>
+      reactShim.createElement('button', {
+        key: item.id,
+        'data-item': item.id,
+        onClick: () => props.onSelect(item.id),
+      }, [item.label, item.icon]))),
+  ]),
+  Tooltip: (props) => props.children,
+  Toast: (props) => reactShim.createElement('div', { 'data-toast': props.text }, [props.text]),
+  IconChevronDownOutlineRegular: () => reactShim.createElement('span', null, ['chevron']),
+  IconRightUpOutlineRegular: () => reactShim.createElement('span', null, ['up']),
+  IconWarningOutlineRegular: () => reactShim.createElement('span', null, ['warning']),
+}
+
+/** The `requires` map that makes the takeover render. */
+const withPrimitives = () => ({ '@deepseek-ai/dsh-client-ui-primitives': primitivesStub })
+
 /** Recursively render function components into plain host elements. */
 function expand(vnode) {
   if (vnode === null || vnode === undefined || typeof vnode !== 'object') return vnode
@@ -113,10 +157,11 @@ function nodeByKey(vnode, key) {
 // ------------------------------------------------------------------- harness
 
 /** Load the bundle against a fresh fake window and boot it. */
-async function bootClient({ services = {} } = {}) {
+async function bootClient({ services = {}, requires = {}, dictionaries = [] } = {}) {
   const source = await readFile(BUNDLE, 'utf8')
   // Same realm on purpose: the bundle's own arrays/objects must satisfy
   // `assert.deepStrictEqual`, which a `vm` context's foreign prototypes break.
+  const storage = new Map()
   const fakeWindow = {
     __ModuleLoader__: {
       load(options) {
@@ -124,6 +169,12 @@ async function bootClient({ services = {} } = {}) {
       },
     },
     prompt: () => 'prompted',
+    localStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => {
+        storage.set(key, String(value))
+      },
+    },
   }
   const runBundle = new Function('window', source)
   runBundle(fakeWindow)
@@ -132,12 +183,13 @@ async function bootClient({ services = {} } = {}) {
   assert.ok(loadOptions, 'the bundle must register a factory')
   const exportsObject = loadOptions.factory((specifier) => {
     if (specifier === 'react') return reactShim
+    if (Object.prototype.hasOwnProperty.call(requires, specifier)) return requires[specifier]
     throw new Error('unexpected require: ' + specifier)
   })
 
   const slots = []
   const triggers = []
-  const dictionaries = []
+  const allDictionaries = dictionaries.slice()
   const effects = []
 
   const ctx = {
@@ -153,12 +205,12 @@ async function bootClient({ services = {} } = {}) {
     },
     locale: {
       register(ns, dicts) {
-        dictionaries.push({ ns, dicts })
+        allDictionaries.push({ ns, dicts })
         return () => {}
       },
       bind(ns) {
         return (key, params) => {
-          const dict = dictionaries.find((entry) => entry.ns === ns)
+          const dict = allDictionaries.find((entry) => entry.ns === ns)
           const raw = dict && dict.dicts.zh ? dict.dicts.zh[key] : key
           if (raw === undefined) return key
           if (!params) return raw
@@ -199,7 +251,7 @@ async function bootClient({ services = {} } = {}) {
     loadOptions,
     slots,
     triggers,
-    dictionaries,
+    dictionaries: allDictionaries,
     effects,
     /** Find a registered slot registration by slot key. */
     slot(key) {
@@ -236,10 +288,12 @@ const STATE = {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 /** Boot the client with both transports wired, and return a render helper. */
-async function boot({ onRpc, onCommand, services = {} } = {}) {
+async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionaries = [] } = {}) {
   const rpcLog = []
   const commandLog = []
   const harness = await bootClient({
+    requires,
+    dictionaries,
     services: {
       sessions: {
         list: {
@@ -450,7 +504,7 @@ test('on the creation page the panel uses the sessionless channel, not the comma
   await flush()
   assert.deepEqual(
     rpcLog.map((call) => call.endpoint),
-    ['codeWorkspace/state', 'codeWorkspace/recent'],
+    ['codeWorkspace/state', 'codeWorkspace/recent', 'codeWorkspace/editors'],
   )
   assert.deepEqual(rpcLog[0].args, { containerDir: 'D:/ws' })
   assert.equal(commandLog.length, 0)
@@ -612,3 +666,198 @@ test('apply survives a composition with no optional services at all', async () =
   assert.equal(harness.slot('conversation.input.dock').component({}), null)
   assert.equal(harness.slot('shell.overlay').component({}), null)
 })
+
+// ------------------------------------------------------- open in an editor
+
+const DETECTED = {
+  editors: [
+    { id: 'trae', label: 'Trae CN', executable: 'D:/app/Trae CN/Trae CN.exe', source: 'uninstall-record' },
+    { id: 'vscode', label: 'VS Code', executable: 'C:/Code/Code.exe', source: 'app-paths' },
+  ],
+  preferred: 'trae',
+  ssh: false,
+  platform: 'win32',
+}
+
+test('the panel lists every detected family editor and opens the workspace through the host', async () => {
+  const { header, overlay, rpcLog } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/editors') return ok(DETECTED)
+      if (endpoint === 'codeWorkspace/openInEditor') {
+        return ok({ ok: true, editor: 'vscode', label: 'VS Code', executable: 'C:/Code/Code.exe', target: 'D:/ws/app.code-workspace', kind: 'workspace' })
+      }
+      return ok(STATE)
+    },
+  })
+  header.component(kit()).props.onClick()
+  await flush()
+  let tree = expand(overlay.component({}))
+  assert.match(textOf(tree), /在编辑器中打开/)
+  const button = buttonByLabel(tree, 'VS Code')
+  assert.ok(button, 'a button per detected editor must exist')
+  // The tooltip names the executable and the target the host will use.
+  assert.match(String(button.props.title), /Code\.exe/)
+  assert.match(String(button.props.title), /app\.code-workspace/)
+  button.props.onClick()
+  await flush()
+  const call = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/openInEditor')
+  assert.deepEqual(call.args, { containerDir: 'D:/ws', editorId: 'vscode' })
+  // The host's own answer is surfaced, naming the editor and the file it opened.
+  tree = expand(overlay.component({}))
+  assert.match(textOf(tree), /已用 VS Code 打开/)
+  assert.match(textOf(tree), /app\.code-workspace/)
+})
+
+test('a host failure on open is surfaced as the host message, not swallowed', async () => {
+  const { header, overlay } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/editors') return ok(DETECTED)
+      if (endpoint === 'codeWorkspace/openInEditor') {
+        return { ok: false, error: { message: 'code-workspace: the editor refused to start' } }
+      }
+      return ok(STATE)
+    },
+  })
+  header.component(kit()).props.onClick()
+  await flush()
+  buttonByLabel(expand(overlay.component({})), 'Trae CN').props.onClick()
+  await flush()
+  assert.match(textOf(expand(overlay.component({}))), /the editor refused to start/)
+})
+
+test('without an editor the panel says so, and an SSH session says why', async () => {
+  const { header, overlay } = await boot({
+    onRpc: (endpoint) => (endpoint === 'codeWorkspace/editors' ? ok({ editors: [], preferred: null, ssh: false, platform: 'win32' }) : ok(STATE)),
+  })
+  header.component(kit()).props.onClick()
+  await flush()
+  assert.match(textOf(expand(overlay.component({}))), /未检测到 VS Code 系列编辑器/)
+
+  const ssh = await boot({
+    onRpc: (endpoint) => (endpoint === 'codeWorkspace/editors' ? ok({ editors: [], preferred: null, ssh: true, platform: 'win32' }) : ok(STATE)),
+  })
+  ssh.header.component(kit()).props.onClick()
+  await flush()
+  assert.match(textOf(expand(ssh.overlay.component({}))), /通过 SSH 访问/)
+})
+
+test('the family takes over the shipped cell at a lower priority, and is skipped without the primitives', async () => {
+  const taken = await bootClient({ requires: withPrimitives() })
+  await flush()
+  const headerCell = taken.slots.find((entry) => entry.spec.name === 'conversation.session.header.utilities')
+  const treeCell = taken.slots.find((entry) => entry.spec.name === 'sidebar.right.tab.files.actions')
+  assert.ok(headerCell, 'the header utilities cell must be taken over')
+  assert.ok(treeCell, 'the file tree actions cell must be taken over')
+  assert.equal(headerCell.spec.id, 'open-in-app')
+  // Lowest priority renders, so -2 beats the shipped 0 and open-in-trae's -1
+  // without ever registering at a priority that would throw.
+  assert.equal(headerCell.spec.priority, -2)
+  assert.equal(treeCell.spec.priority, -2)
+  assert.equal(headerCell.spec.order, -10)
+
+  // Without the seed module the shipped control is left in place rather than
+  // shadowed by a cell that cannot render.
+  const bare = await bootClient()
+  assert.equal(bare.slots.some((entry) => entry.spec.name === 'conversation.session.header.utilities'), false)
+  assert.equal(bare.slots.length, 3)
+})
+
+test('the menu keeps every shipped entry, replaces the family ones, and adds the missing family', async () => {
+  shippedRoutes.apps = ['explorer', 'vscode', 'sublimetext']
+  shippedRoutes.openLog = []
+  const harness = await bootClient({
+    requires: withPrimitives(),
+    dictionaries: [{ ns: 'open-in-app', dicts: { zh: { 'app.explorer': '文件资源管理器（默认）', 'app.vscode': 'VS Code', 'app.sublimetext': 'Sublime Text' }, en: {} } }],
+    services: {
+      sessions: { list: { getSnapshot: () => ({ byId: { 'session-1': { cwd: 'D:/ws' } } }) } },
+      connection: {
+        rpc: {
+          call: (channel, endpoint) => Promise.resolve(endpoint === 'codeWorkspace/editors' ? ok(DETECTED) : ok(null)),
+        },
+      },
+    },
+  })
+  await flush()
+  const cell = harness.slots.find((entry) => entry.spec.name === 'conversation.session.header.utilities')
+  const props = Object.assign({}, cell.spec.inject(), {
+    sessionId: 'session-1',
+    useSessions: (selector) => selector({ byId: { 'session-1': { cwd: 'D:/ws' } } }),
+  })
+  const tree = expand(cell.component(props))
+  const items = nodesWhere(tree, (node) => node.props && node.props['data-item'] !== undefined).map((node) => node.props['data-item'])
+  // Shipped order is preserved, VS Code is replaced rather than duplicated, and
+  // Trae — which the shipped catalog cannot know — is appended.
+  assert.deepEqual(items, ['app:explorer', 'app:vscode', 'app:sublimetext', 'app:trae'])
+  assert.match(textOf(tree), /Trae CN/)
+})
+
+test('a family entry opens the workspace through this plugin, every other entry through the shipped route', async () => {
+  shippedRoutes.apps = ['explorer', 'vscode']
+  shippedRoutes.openLog = []
+  const rpcLog = []
+  const harness = await bootClient({
+    requires: withPrimitives(),
+    dictionaries: [{ ns: 'open-in-app', dicts: { zh: { 'app.explorer': '文件资源管理器（默认）', 'app.vscode': 'VS Code' }, en: {} } }],
+    services: {
+      sessions: { list: { getSnapshot: () => ({ byId: { 'session-1': { cwd: 'D:/ws' } } }) } },
+      connection: {
+        rpc: {
+          call: (channel, endpoint, payload) => {
+            rpcLog.push({ endpoint, args: payload && payload.args })
+            return Promise.resolve(endpoint === 'codeWorkspace/editors' ? ok(DETECTED) : ok({ ok: true, editor: 'trae', label: 'Trae CN', target: 'D:/ws/app.code-workspace', kind: 'workspace' }))
+          },
+        },
+      },
+    },
+  })
+  await flush()
+  const cell = harness.slots.find((entry) => entry.spec.name === 'conversation.session.header.utilities')
+  const props = Object.assign({}, cell.spec.inject(), {
+    sessionId: 'session-1',
+    useSessions: (selector) => selector({ byId: { 'session-1': { cwd: 'D:/ws' } } }),
+  })
+  const itemButton = (tree, itemId) => nodesWhere(tree, (node) => node.props && node.props['data-item'] === itemId)[0]
+
+  itemButton(expand(cell.component(props)), 'app:trae').props.onClick()
+  await flush()
+  const own = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/openInEditor')
+  assert.deepEqual(own.args, { containerDir: 'D:/ws', editorId: 'trae' })
+  assert.equal(shippedRoutes.openLog.length, 0)
+
+  itemButton(expand(cell.component(props)), 'app:explorer').props.onClick()
+  await flush()
+  assert.deepEqual(shippedRoutes.openLog, [{ app: 'explorer', path: 'D:/ws' }])
+})
+
+test('a failed shipped launch leaves the control in its error state instead of claiming success', async () => {
+  shippedRoutes.apps = ['explorer']
+  shippedRoutes.openLog = []
+  shippedRoutes.openOk = false
+  try {
+    const harness = await bootClient({
+      requires: withPrimitives(),
+      dictionaries: [{ ns: 'open-in-app', dicts: { zh: { 'app.explorer': '文件资源管理器（默认）' }, en: {} } }],
+      services: {
+        sessions: { list: { getSnapshot: () => ({ byId: { 'session-1': { cwd: 'D:/ws' } } }) } },
+        connection: { rpc: { call: () => Promise.resolve(ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })) } },
+      },
+    })
+    await flush()
+    const cell = harness.slots.find((entry) => entry.spec.name === 'conversation.session.header.utilities')
+    const props = Object.assign({}, cell.spec.inject(), {
+      sessionId: 'session-1',
+      useSessions: (selector) => selector({ byId: { 'session-1': { cwd: 'D:/ws' } } }),
+    })
+    // The launch state lives in the shared store, which is what the control's own
+    // banner reads (the banner's transient copy is component state, which this
+    // hook-once React shim deliberately cannot re-render).
+    const operation = props.hooks.openInAppLaunch
+    nodesWhere(expand(cell.component(props)), (node) => node.props && node.props['data-item'] === 'app:explorer')[0].props.onClick()
+    await flush()
+    assert.deepEqual(operation.get(), { phase: 'error', id: 'explorer' })
+    assert.deepEqual(shippedRoutes.openLog, [{ app: 'explorer', path: 'D:/ws' }])
+  } finally {
+    shippedRoutes.openOk = true
+  }
+})
+
