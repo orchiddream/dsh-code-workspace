@@ -41,8 +41,9 @@ Consequences that follow from this and are not bugs:
 | Model | `lib/workspace-file.js` | VS Code path rules, folders CRUD, serialization. Pure, no fs |
 | Editor family | `lib/editor.js` | Which VS Code-family editor this host holds, the child environment, the launch |
 | Editor icon | `lib/editor-icon.js` | Associated-icon extraction for the family entries no shipped route serves |
-| Host | `lib/index.js` | Discovery, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor endpoints |
-| Client | `lib/client.js` | The Conversation view page, its header-button fallback for degraded compositions, session-creation dock chip and its popover, "Open In…" takeover, `@` companion group |
+| Host | `lib/index.js` | Discovery, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor and file-dialog endpoints |
+| File dialog | `lib/workspace-picker.js` | The host's native `.code-workspace` file dialog, as the file-shaped sibling of the shipped directory-only picker |
+| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback for degraded compositions, session-creation dock chip and its popover, "Open In…" takeover, `@` companion group |
 
 ## Why the writer is surgical
 
@@ -178,6 +179,20 @@ folders while reading the conversation it affects is the actual job, and a float
 that covers the conversation — anchored, fixed width, with its own scrollbar — is the
 worst shape for it.
 
+The panel now has **two surfaces with different scopes**, and the split is the point:
+
+| Surface | Scope | Why it exists |
+| --- | --- | --- |
+| The **left-column row** and the central panel it opens | app / sessionless | the only entry that needs nothing to exist yet: a profile with no workspace open can still pick a `.code-workspace` file, and that pick is what creates the workspace |
+| The **Conversation view** tab | per session | the folder manager beside the conversation whose roots it decides |
+| The floating popover (`shell.overlay`) | sessionless | the creation page has no session to host a tab or a panel row |
+
+Both pages register under **one id**, `code-workspace`, and that is deliberate: a
+`sidebar.panellist` id IS the `main` key it opens — the shell resolves a click through
+`layout.selectPanel(id)` — and this bundle's Conversation view already answers to
+`code-workspace`. So the sidebar row, the tab and `selectPanel('code-workspace')` all
+address one page, and there is no second id that could drift out of step.
+
 A **docked right-Sidebar page** was tried first and rejected: the right column is narrow,
 its content is not the conversation's width, and the workspace form's action rows wrapped
 into a heap. The surface the product already has for "another full page inside this
@@ -219,6 +234,75 @@ Three consequences are load-bearing:
   than the read window the docked page needed — an always-mounted tab could be remounted
   by its neighbours, and the window that fixed that had to be keyed by session, which is
   exactly the kind of state that grows into a bug.
+
+### The page as a manager
+
+The left-column entry is the app-level surface, so its page is a **list**, not a detail view:
+every recorded `.code-workspace` file, most recently used first, with the rows that are
+already DSH workspaces marked and the ones whose file is gone marked as such.
+
+Two sources are joined by path spelling because they answer different questions: the
+plugin's store ("a file I have used", probed per row by `recent`) and the workspace service
+("a workspace this app already has"). A workspace the plugin has no file for is still listed,
+because hiding it would make the list a lie about what exists.
+
+**Removing a record needs the file as the address**, which is why `forgetFile` exists
+alongside the directory-addressed `forget`: a manager shows records the current session is
+not on, and a stale record — a temporary workspace whose directory has long gone — is
+exactly the entry a user wants to clear. `forgetFile` answers the refreshed list, so the
+panel gets its one answer from one round trip, and the action is confirmed first because the
+list has no undo.
+
+That stale-record case is not hypothetical: the live-verification script registers a
+temporary workspace through the real remote API, which permanently records its file in the
+profile's store. The script now forgets it in its own teardown.
+
+A session created in a directory with no `.code-workspace` file (or with several, which is
+ambiguous by discovery) has nothing associated, and that is exactly the state where the user
+needs an *action*, not a status line. So the empty state carries the actions — switch file
+(browse), the host's own dialog, and create — instead of leaving them one level down inside
+a file section that only exists once a file is known. Without that, removing the header
+button's popover would have removed the only way to associate a workspace file from an open
+session.
+
+The browser starts at the **host home** (`remote.$host.home`), not at the session's own
+directory. That is deliberate: the session directory is the one place the file has already
+been shown to be absent, and a `.code-workspace` file for the repository you are working in
+usually sits somewhere else entirely. Home is the closest thing to "somewhere to browse
+from" that a host can name; when the host publishes none, the session directory is the
+fallback.
+
+### The host's own file dialog
+
+Browsing inside the app is the fallback, not the primary gesture: what a user actually wants
+is their operating system's file picker. The shipped picker seam cannot serve that — its
+`native` capability opens the platform dialog with a **pick-folders** flag, and there is no
+file variant of the seam to compose with — so `lib/workspace-picker.js` is the file-shaped
+sibling, built the way `lib/editor-icon.js` builds its icon: a generated PowerShell script,
+absolute `powershell.exe`, no shell, and an injectable runner.
+
+Two details are load-bearing:
+
+- **`-STA`.** The common file dialog is a COM apartment-threaded control; a Windows
+  PowerShell host defaults to MTA and WinForms refuses to run it there. This is the kind of
+  thing that works on one machine and dies on another, so it is pinned by a test.
+- **The answer is read from a file, never from stdout.** No output parsing and no host
+  encoding in the path of a value that is about to become a workspace root. A cancelled
+  dialog simply leaves that file absent, which is why exit code 1 is the cancellation and
+  every other non-zero code is `unavailable`.
+
+The three outcomes are separate on purpose, because the user's next move differs:
+`picked` opens the file; `cancelled` says nothing (the operator chose it — an error toast for
+cancelling a dialog is noise); `unavailable` explains itself once, because the answer is
+"use the browser below", and that is only discoverable if the message says so. A host over
+SSH is `unavailable` by construction: a dialog would open on a screen nobody is looking at.
+
+The dialog itself has not been opened on a real desktop yet — the decisions above are pinned
+by tests with an injected runner, and the README says so rather than implying more.
+
+Picking a file then registers its container directory as the DSH workspace and, when
+`uiWorkspace.openWorkspace` exists, switches the current session to it — which is how an
+already-open session lands on a real workspace without the user leaving the tab.
 
 **The tab is the entry point, and the header button is the degraded one.** A tab is visible
 for the whole session, so a header button beside it is a second entry point for one page —
@@ -444,7 +528,8 @@ one `dsh-multi-folder` carries for its config file.
 ## Tests
 
 `test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (22), `test/host.test.mjs`
-(43), `test/client.test.mjs` (36) and `test/editor.test.mjs` (22) run with no DSH
+(43), `test/client.test.mjs` (44), `test/editor.test.mjs` (22) and
+`test/workspace-picker.test.mjs` (10) run with no DSH
 runtime. The host tests use a fake `fs` seam, `systemPrompt`, `commands` registry and
 `shell`/`jobs`; the editor tests inject the platform, environment, registry reader,
 `PATH` lookup and file probe, and hand `launchEditor` a child-process double, so a test

@@ -255,9 +255,9 @@ test('apply registers the prompt section, the command, the service and the remot
   assert.equal(b.remoteContribution.package, 'dsh-code-workspace')
   const methods = b.remoteContribution.invocations.map((i) => i.method)
   assert.deepEqual(methods, [
-    'state', 'recent', 'open', 'forget', 'useFile', 'create',
+    'state', 'recent', 'forgetFile', 'open', 'forget', 'useFile', 'create',
     'addFolder', 'removeFolder', 'renameFolder', 'moveFolder',
-    'browse', 'makeDir', 'pick', 'reveal', 'editors', 'editorIcon',
+    'browse', 'makeDir', 'pick', 'pickFile', 'reveal', 'editors', 'editorIcon',
     'openInEditor', 'listFiles',
   ])
   for (const invocation of b.remoteContribution.invocations) {

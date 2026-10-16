@@ -221,6 +221,11 @@ try {
   const missing = await rpc('codeWorkspace/addFolder', { containerDir, path: join(containerDir, 'nope').replace(/\\/g, '/') }, 'verify-missing')
   record('adding a missing directory is refused with a readable message', missing.ok === false && /does not exist/.test(missing.text), missing.text.slice(0, 200))
 } finally {
+  // The scratch directory is about to disappear, but `open` recorded its file in
+  // the profile's workspace store — a real, persistent write. Drop the record too,
+  // or the run leaves a permanent "missing" entry in the user's workspace list
+  // (which is how one got there in the first place).
+  await rpc('codeWorkspace/forgetFile', { file: join(scratchBase, 'ws', 'team.code-workspace').replace(/\\/g, '/') }, 'verify-cleanup').catch(() => undefined)
   await rm(scratchBase, { recursive: true, force: true })
 }
 

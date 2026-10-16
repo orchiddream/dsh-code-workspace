@@ -86,14 +86,21 @@ Three entries, same effect:
 
 | Entry | Where |
 | --- | --- |
+| **The left column** | a "Code Workspace" row in the sidebar panel list, beside the shipped Plugins and Scheduled-tasks rows — **openable with no session and no workspace** |
 | **Session-creation page** | the "Code Workspace" chip above the composer, in the same band as the git-branch chip |
 | **The panel's tab** | the "Code Workspace" tab beside Chat / Trajectory / Git, for the whole life of the session |
 | **Session header** | the same action as a header button — present only in a composition where that tab could not register |
 | **Slash command** | `/code-workspace use <path>` |
 
+The left-column row is the one entry that needs nothing else to exist: it is a `sidebar.panellist` cell (`id` `code-workspace`, order 5 — between Plugins at 0 and Scheduled tasks at 10) whose click runs the shell's `layout.selectPanel('code-workspace')`, and that id is also the key of this bundle's `main` cell and of its Conversation view. So the sidebar row, the Conversation tab and that panel id all address **one page**, and the page is sessionless: it reads the host over the shared RPC channel and can register a workspace before any session exists.
+
 The panel can browse the filesystem for a `.code-workspace` file or create a new one. Once one is chosen, the plugin calls `workspaceRegistry.create()` to register the container directory as a DSH workspace and — when the client composition exposes `uiWorkspace` — switches the session straight to it.
 
-Independently, **if the session's cwd holds exactly one `.code-workspace` file the plugin adopts it automatically** and records it, so in the common case there is nothing to do: just create the session in that directory. Two or more candidates is ambiguous and resolves to nothing — pick one in the panel.
+**Choose in Explorer…** opens the host's own file dialog, filtered to `*.code-workspace`, so the common case does not need the in-app browser at all. The shipped picker seam only answers directories (its native capability opens the platform dialog with a pick-folders flag), so this is the file-shaped sibling: a generated PowerShell script over the same absolute `powershell.exe`, with `-STA` because the common file dialog is apartment-threaded, and the chosen path read from a file rather than parsed out of stdout. Three answers, all meaningful: a path is opened; a **cancel** is silent, because it is the operator's choice; **unavailable** explains itself once — non-Windows, or the operator is not at the host's screen (SSH) — and the in-app browser below stays right there. The dialog is a host-desktop affair; over SSH it deliberately does not appear.
+
+**With nothing associated yet, the page is the picker.** A session created in a directory that holds no `.code-workspace` file (or that holds several) shows the panel's empty state with **Switch file** and **New workspace file** right there — you do not have to create the session in the right directory first. The browser starts at the **host home**, not at the session's own directory, because the file you are looking for is usually somewhere else. Picking one registers its container directory as the DSH workspace and, when `uiWorkspace` is available, switches the current session to it — which is how an already-open session ends up on a real workspace without leaving the tab.
+
+Independently, **if the session's cwd holds exactly one `.code-workspace` file the plugin adopts it automatically** and records it, so in that case there is nothing to do: just create the session in that directory. Two or more candidates is ambiguous and resolves to nothing — pick one in the panel.
 
 ### The `/code-workspace` command
 
@@ -197,8 +204,9 @@ Because a `.code-workspace` file decides which directories this session may writ
 | Workspace model | `lib/workspace-file.js` | VS Code path rules, folders add/remove/reorder/rename, serialization; pure functions, no fs |
 | Editor family | `lib/editor.js` | Which VS Code-family editor this host holds (proved, never assumed), the child environment an Electron editor needs, and a launch whose success is decoupled from the editor's lifetime |
 | Editor icon | `lib/editor-icon.js` | One executable's associated icon for the family entries no shipped route serves; verified payload or nothing |
-| Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor endpoints |
-| Client | `lib/client.js` | The Conversation view page, its header-button fallback (degraded compositions only), the session-creation dock chip and its popover, the "Open In…" takeover, `@` companion group |
+| File dialog | `lib/workspace-picker.js` | The host's own file dialog for a `.code-workspace` file — the file-shaped sibling of the shipped directory-only picker; three outcomes (picked / cancelled / unavailable), injectable runner, no dialog in any test |
+| Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor and file-dialog endpoints |
+| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation dock chip and its popover, the "Open In…" takeover, `@` companion group |
 
 - **Discovery**: the session cwd → a recorded file wins; otherwise a directory holding exactly one `.code-workspace` adopts it. Two or more candidates is ambiguous and grants nothing.
 - **Caching**: model 2 s, discovery 3 s, `@` index 4 s. `fs.stat` metadata is deliberately **not** used for invalidation — the fields an `FsInfo` carries are not part of the plugin-facing contract, so a stamp built from them could silently never change and pin a stale root set for a whole session. Panel and command reads always force a fresh parse.
@@ -214,7 +222,7 @@ Because a `.code-workspace` file decides which directories this session may writ
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-Five files, 148 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), and a minimal React shim on the client side (hooks resolve once per call, function components are expanded recursively, and `useEffect` runs once per mount as React does), so the rendered tree can be inspected and clicks simulated directly.
+Six files, 166 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
 
 ```bash
 node test/jsonc.test.mjs            # JSONC parsing and comment-preserving rewrites
@@ -240,7 +248,7 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 
 Measured on `0.2.0-rc.2`: **30/30** — the 25 checks it made before the editor feature, plus the five added with it (the served bundle carries the takeover, `codeWorkspace/editors` answers the family, and the two refusals an unknown id must hit). It never launches an editor: both editor calls it makes are refusals by construction.
 
-The Conversation view page is **not covered by that script** (it asserts host endpoints and bundle markers, not rendered UI): its registration, its entry point, its toggle, its degraded no-op and its per-session scoping are pinned by `test/client.test.mjs`. Rendering it inside a real Conversation tab strip has not been observed in a live browser yet.
+The Conversation view page is **not covered by that script** (it asserts host endpoints and bundle markers, not rendered UI): its registration, its entry point, its toggle, its degraded no-op and its per-session scoping are pinned by `test/client.test.mjs`. Rendering it inside a real Conversation tab strip has not been observed in a live browser yet. The same holds for the left-column row and the host file dialog: their registrations, their decisions and their fallbacks are pinned by tests, but the dialog itself has not been opened on a real desktop yet.
 
 ---
 

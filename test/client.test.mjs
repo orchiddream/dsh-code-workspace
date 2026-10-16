@@ -188,6 +188,13 @@ async function bootClient({ services = {}, requires = {}, dictionaries = [], val
       },
     },
     prompt: () => 'prompted',
+    // Records what was asked and answers yes, so a test can assert both that the
+    // user is warned and that the action proceeds.
+    confirm: (message) => {
+      fakeWindow.__confirmations.push(message)
+      return true
+    },
+    __confirmations: [],
     localStorage: {
       getItem: (key) => (storage.has(key) ? storage.get(key) : null),
       setItem: (key, value) => {
@@ -282,6 +289,7 @@ async function bootClient({ services = {}, requires = {}, dictionaries = [], val
     triggers,
     dictionaries: allDictionaries,
     effects,
+    confirmations: fakeWindow.__confirmations,
     /** Find a registered slot registration by slot key. */
     slot(key) {
       const found = slots.find((entry) => entry.spec.name === key)
@@ -416,7 +424,8 @@ async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionari
   const dock = harness.slot('conversation.input.dock')
   const overlay = harness.slot('shell.overlay')
   const view = harness.slots.find((entry) => entry.spec.name === 'conversation.view')
-  return { harness, rpcLog, commandLog, header, dock, overlay, view, layout: face }
+  const panel = harness.slots.find((entry) => entry.spec.name === 'main')
+  return { harness, rpcLog, commandLog, header, dock, overlay, view, panel, layout: face, confirmations: harness.confirmations }
 }
 
 /** Props the standard kit would inject for a session-scoped entry. */
@@ -443,12 +452,12 @@ test('the bundle registers one factory under the package name and exports name/i
   assert.equal(typeof exportsObject.apply, 'function')
 })
 
-test('apply registers the View tab, the header action, the dock entry and the overlay panel', async () => {
+test('apply registers the View tab, the sidebar entry, its panel, the header action, the dock entry and the overlay', async () => {
   const face = layoutStub()
   const harness = await bootClient({ services: face.services })
   assert.deepEqual(
     harness.slots.map((entry) => entry.spec.name),
-    ['conversation.session.header.actions', 'conversation.input.dock', 'shell.overlay', 'conversation.view'],
+    ['conversation.session.header.actions', 'conversation.input.dock', 'shell.overlay', 'main', 'sidebar.panellist', 'conversation.view'],
   )
   const header = harness.slot('conversation.session.header.actions').spec
   assert.equal(header.id, 'code-workspace')
@@ -473,6 +482,18 @@ test('apply registers the View tab, the header action, the dock entry and the ov
   assert.equal(view.order, 30)
   assert.equal(view.locale, 'code-workspace')
   assert.equal(view.label(), '代码工作区')
+
+  // The sidebar entry and the central panel it opens, under ONE id: the shell
+  // resolves a sidebar click through `selectPanel(id)`, which dispatches by the
+  // `main` cell's key.
+  const main = harness.slot('main').spec
+  assert.equal(main.key, 'code-workspace')
+  const entry = harness.slot('sidebar.panellist').spec
+  assert.equal(entry.id, 'code-workspace')
+  assert.equal(entry.locale, 'code-workspace')
+  assert.equal(entry.label(), '代码工作区')
+  // The shipped rows are plugins at 0 and scheduled tasks at 10.
+  assert.ok(entry.order > 0 && entry.order < 10, 'the entry sits between the shipped app panels')
 })
 
 test('the zh and en dictionaries carry exactly the same keys', async () => {
@@ -681,6 +702,37 @@ test('a re-render never triggers a read, and a remount reads once', async () => 
   assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1', 'session-1'])
 })
 
+test('a stale record can be removed from the list, and the file itself is not touched', async () => {
+  const calls = []
+  const { panel, confirmations } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/recent') {
+        return ok({ files: [{ file: 'D:/gone/old.code-workspace', containerDir: 'D:/gone', title: 'old', exists: false, missing: true }] })
+      }
+      if (endpoint === 'codeWorkspace/forgetFile') {
+        calls.push(args.file)
+        // The host answers the refreshed list, so one round trip both removes and
+        // re-reads.
+        return ok({ files: [] })
+      }
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(STATE)
+    },
+  })
+  expand(panel.component({}))
+  await flush()
+  const tree = expand(panel.component({}))
+  const forget = nodesWhere(tree, (node) => node.props && node.props.title === '取消关联')[0]
+  assert.ok(forget, 'a record must be removable from the list — text: ' + textOf(tree))
+  forget.props.onClick({ stopPropagation() {} })
+  await flush()
+  assert.deepEqual(calls, ['D:/gone/old.code-workspace'])
+  // A list has no undo, so the user is asked first.
+  assert.equal(confirmations.length, 1)
+  assert.match(confirmations[0], /old\.code-workspace/)
+  assert.match(textOf(expand(panel.component({}))), /还没有记录过任何/)
+})
+
 test('a View with no workspace renders the empty state and still reads its session', async () => {
   const face = layoutStub()
   const { view } = await boot({
@@ -698,7 +750,227 @@ test('a View with no workspace renders the empty state and still reads its sessi
     useWorkspaces: (selector) => selector({ items: [] }),
   }))
   assert.ok(tree)
-  assert.match(textOf(tree), /先选择一个工作区目录|未关联/)
+  assert.match(textOf(tree), /还没有关联 \.code-workspace 文件/)
+})
+
+test('with nothing associated the page itself is the picker, starting at the host home', async () => {
+  const face = layoutStub()
+  const { view, rpcLog } = await boot({
+    layout: face,
+    onRpc: (endpoint) => (endpoint === 'codeWorkspace/browse' ? ok({ path: 'C:/Users/edy', parent: 'C:/Users', home: 'C:/Users/edy', entries: [], truncated: false }) : ok(null)),
+    services: {
+      sessions: { list: { getSnapshot: () => ({ current: 'session-2', ids: ['session-2'], byId: { 'session-2': { cwd: undefined } } }) } },
+      workspaces: { list: { getSnapshot: () => ({ items: [] }) } },
+    },
+  })
+  const props = {
+    sessionId: 'session-2',
+    useSessions: (selector) => selector({ byId: { 'session-2': { cwd: undefined } } }),
+    useWorkspaces: (selector) => selector({ items: [] }),
+  }
+  expand(view.component(props))
+  await flush()
+  const tree = expand(view.component(props))
+  // The entry that was lost when the header button's popover went away: without
+  // it there is no way to associate a workspace file from this session at all.
+  buttonByLabel(tree, '切换文件').props.onClick()
+  await flush()
+  const browse = rpcLog.find((call) => call.endpoint === 'codeWorkspace/browse')
+  assert.ok(browse, 'opening a workspace file must start a browse')
+  // Not the session directory (where the file was already shown to be absent),
+  // but the host home — the one place a host can name to browse from.
+  assert.deepEqual(browse.args, { path: 'C:/Users/edy' })
+  const browsed = expand(view.component(props))
+  assert.match(textOf(browsed), /浏览目录/)
+  assert.match(textOf(browsed), /C:\/Users\/edy/)
+})
+
+// ------------------------------------------- the sidebar entry and its panel
+
+test('the sidebar entry opens a sessionless panel, so it works with no workspace open yet', async () => {
+  const { panel, overlay, commandLog, rpcLog } = await boot()
+  assert.ok(panel, 'the sidebar panel must register as the main cell')
+  expand(panel.component({}))
+  await flush()
+  // No session exists here, so the page drives the host's sessionless channel.
+  // That is the whole point of this entry: it does not need a Workspace.
+  assert.deepEqual(commandLog, [])
+  assert.ok(rpcLog.some((call) => call.endpoint === 'codeWorkspace/editors'), JSON.stringify(rpcLog))
+  // Nothing is associated yet, so the page offers the picker rather than a status.
+  const tree = expand(panel.component({}))
+  assert.match(textOf(tree), /代码工作区/)
+  assert.equal(expand(overlay.component({})), null)
+})
+
+test('the sidebar page is a manager: it lists every workspace it knows, and marks the registered ones', async () => {
+  const listing = {
+    path: 'C:/Users/edy',
+    parent: 'C:/Users',
+    home: 'C:/Users/edy',
+    entries: [],
+    truncated: false,
+  }
+  const { panel } = await boot({
+    services: {
+      workspaces: {
+        list: {
+          getSnapshot: () => ({ items: [{ id: 'w1', path: 'D:/ws', sessionIds: ['session-1'] }] }),
+        },
+      },
+    },
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/recent') {
+        return ok({
+          files: [
+            { file: 'D:/ws/app.code-workspace', containerDir: 'D:/ws', title: 'app', exists: true, missing: false },
+            // Recorded but gone: the host probes every file, and a manager that
+            // silently dropped it would hide that it disappeared.
+            { file: 'D:/gone/old.code-workspace', containerDir: 'D:/gone', title: 'old', exists: false, missing: true },
+          ],
+        })
+      }
+      if (endpoint === 'codeWorkspace/browse') return ok(listing)
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      return ok(null)
+    },
+  })
+  expand(panel.component({}))
+  await flush()
+  const tree = expand(panel.component({}))
+  const text = textOf(tree)
+  assert.match(text, /代码工作区/, 'the list has a heading')
+  assert.match(text, /app/)
+  assert.match(text, /D:\/ws/)
+  assert.match(text, /old/)
+  // `D:/ws` is a registered DSH workspace, `D:/gone` is not.
+  assert.match(text, /已注册/)
+  assert.match(text, /不存在/)
+})
+
+test('choosing a listed workspace opens it, which is how a session moves between workspaces', async () => {
+  const opened = []
+  const { panel } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/recent') {
+        return ok({ files: [{ file: 'D:/other/team.code-workspace', containerDir: 'D:/other', title: 'team', exists: true, missing: false }] })
+      }
+      if (endpoint === 'codeWorkspace/open') {
+        opened.push(args.file)
+        return ok(Object.assign({}, STATE, { workspace: { id: 'w2', path: 'D:/other', title: 'team' } }))
+      }
+      if (endpoint === 'codeWorkspace/browse') {
+        return ok({ path: 'D:/other', parent: 'D:/', home: 'C:/Users/edy', entries: [], truncated: false })
+      }
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(STATE)
+    },
+  })
+  expand(panel.component({}))
+  await flush()
+  const tree = expand(panel.component({}))
+  const row = nodesWhere(tree, (node) => node.props && node.props.title === 'D:/other/team.code-workspace')[0]
+  assert.ok(row, 'the listed workspace must render a row — text: ' + textOf(tree))
+  row.props.onClick()
+  await flush()
+  assert.deepEqual(opened, ['D:/other/team.code-workspace'])
+})
+
+test('the sidebar panel shows a workspace picked on the creation page', async () => {
+  const opened = []
+  const { dock, overlay, panel } = await boot({
+    services: { uiWorkspace: { openWorkspace(id) { opened.push(id); return Promise.resolve() } } },
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/open') {
+        return ok(Object.assign({}, STATE, { workspace: { id: 'w9', path: 'D:/ws', title: 'app' } }))
+      }
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      if (endpoint === 'codeWorkspace/browse') {
+        return ok({ path: 'D:/ws', parent: 'D:/', home: 'C:/Users/edy', entries: [], truncated: false })
+      }
+      return ok(STATE)
+    },
+  })
+  // Pick the file on the creation page, which has no session…
+  expand(dock.component(kit())).children[0].props.onClick()
+  await flush()
+  assert.match(textOf(expand(overlay.component({}))), /D:\/ws\/app\.code-workspace/)
+  // …then the user opens the sidebar page, for the same workspace, with no session.
+  expand(panel.component({}))
+  await flush()
+  const tree = expand(panel.component({}))
+  assert.match(textOf(tree), /D:\/ws\/app\.code-workspace/)
+  assert.equal(expand(overlay.component({})), null, 'the sidebar page takes over from the popover')
+})
+
+test('the browser offers the host file dialog, and a chosen file is opened as a workspace', async () => {
+  const listing = {
+    path: 'C:/Users/edy',
+    parent: 'C:/Users',
+    home: 'C:/Users/edy',
+    entries: [],
+    truncated: false,
+  }
+  const opened = []
+  const { view } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/browse') return ok(listing)
+      if (endpoint === 'codeWorkspace/pickFile') return ok({ outcome: 'picked', path: 'D:/ws/app.code-workspace' })
+      if (endpoint === 'codeWorkspace/open') {
+        opened.push(args.file)
+        return ok(Object.assign({}, STATE, { workspace: { id: 'w9', path: 'D:/ws', title: 'app' } }))
+      }
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(STATE)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  buttonByLabel(tree, '切换文件').props.onClick()
+  await flush()
+  const browseTree = expand(view.component(kit()))
+  // The dialog is offered beside the in-app browser, not instead of it: a host
+  // that cannot show one (SSH, non-Windows) still has a working path.
+  const native = buttonByLabel(browseTree, '从资源管理器选择')
+  assert.ok(native, 'the host file dialog must be offered — tree: ' + textOf(browseTree))
+  native.props.onClick()
+  await flush()
+  assert.deepEqual(opened, ['D:/ws/app.code-workspace'])
+})
+
+test('a host that cannot show the dialog says so once, and the browser stays usable', async () => {
+  const listing = {
+    path: 'C:/Users/edy',
+    parent: 'C:/Users',
+    home: 'C:/Users/edy',
+    entries: [],
+    truncated: false,
+  }
+  const { view } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/browse') return ok(listing)
+      if (endpoint === 'codeWorkspace/pickFile') {
+        return ok({ outcome: 'unavailable', error: 'this Harness was reached over SSH: the browser is not on this host' })
+      }
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(STATE)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  buttonByLabel(expand(view.component(kit())), '切换文件').props.onClick()
+  await flush()
+  buttonByLabel(expand(view.component(kit())), '从资源管理器选择').props.onClick()
+  await flush()
+  const tree = expand(view.component(kit()))
+  assert.match(textOf(tree), /这台主机打不开系统文件对话框/)
+  assert.match(textOf(tree), /SSH/)
+  // The in-app browser is still there, which is the whole reason to explain it.
+  assert.ok(buttonByLabel(tree, '上级'))
 })
 
 test('the dock entry renders only in the hero phase', async () => {
@@ -915,7 +1187,7 @@ test('a missing RPC channel produces a readable error instead of a TypeError', a
 
 test('apply survives a composition with no optional services at all', async () => {
   const harness = await bootClient()
-  assert.equal(harness.slots.length, 3)
+  assert.equal(harness.slots.length, 5)
   assert.equal(harness.triggers.length, 1)
   // Rendering the components with bare props must not throw.
   assert.ok(harness.slot('conversation.session.header.actions').component({}))
@@ -1015,7 +1287,7 @@ test('the family takes over the shipped cell at a lower priority, and is skipped
   // shadowed by a cell that cannot render.
   const bare = await bootClient()
   assert.equal(bare.slots.some((entry) => entry.spec.name === 'conversation.session.header.utilities'), false)
-  assert.equal(bare.slots.length, 3)
+  assert.equal(bare.slots.length, 5)
 })
 
 test('the menu keeps every shipped entry, replaces the family ones, and adds the missing family', async () => {
