@@ -87,7 +87,8 @@ Three entries, same effect:
 | Entry | Where |
 | --- | --- |
 | **Session-creation page** | the "Code Workspace" chip above the composer, in the same band as the git-branch chip |
-| **Session header** | the "Code Workspace" button beside the session title |
+| **The panel's tab** | the "Code Workspace" tab beside Chat / Trajectory / Git, for the whole life of the session |
+| **Session header** | the same action as a header button — present only in a composition where that tab could not register |
 | **Slash command** | `/code-workspace use <path>` |
 
 The panel can browse the filesystem for a `.code-workspace` file or create a new one. Once one is chosen, the plugin calls `workspaceRegistry.create()` to register the container directory as a DSH workspace and — when the client composition exposes `uiWorkspace` — switches the session straight to it.
@@ -112,7 +113,18 @@ Folders changed from inside a session are announced to the Agent at the **next m
 
 ### The panel
 
-Opened from the session header button or the session-creation chip. It shows the workspace file path, every folder (display name, real path, primary/missing badges) and offers:
+Two surfaces, one body. The panel's page is a **Conversation view** — a tab beside the shipped Chat / Trajectory / Git tabs, at the top of the centre column. The tab is the entry point: it is visible for the whole session. The session-creation chip opens the same body as a floating popover, because that page has no session yet — and that popover is the creation page's only surface.
+
+| Surface | Opened by | Notes |
+| --- | --- | --- |
+| **Conversation view** | its tab in the strip | cell `code-workspace` (order 30) in the list slot `conversation.view`; per session |
+| **Floating popover** (`shell.overlay`) | the session-creation chip | the same body on the sessionless channel: the one place a `.code-workspace` file can be picked before a session exists |
+
+The view belongs to the session it is drawn for, and it addresses that session's own directory — so a panel left on one session never drives another. React mounts it when its tab is selected and unmounts it when the user leaves, so one read per mount is exactly "show me the current state"; the ⟳ button re-reads on demand.
+
+The session header button exists **only in the degraded composition** where that cell could not register — there the tab does not exist and the button is the only way into the page. When the tab is there the button removes itself: two entry points for one page is noise, and a header click that also opened a floating copy of the page was worse than a click that does nothing.
+
+Every surface shows the workspace file path, every folder (display name, real path, primary/missing badges) and offers:
 
 - **Add folder** — a relative or absolute path plus an optional display name; a missing or non-directory path is refused
 - **Move up / down** — reorder `folders`
@@ -121,6 +133,8 @@ Opened from the session header button or the session-creation chip. It shows the
 - **Show in file manager**
 - **Open in editor** — one button per VS Code-family editor found on the host (see below)
 - **Switch file** / **Recent** / **New workspace file** / **Unlink**
+
+The view fills the Conversation's own body and keeps its content in a reading column, so it reads the same in a narrow window and a wide one. It drops the ✕ (the tab strip owns navigation) and says where it lives in a hint line instead.
 
 ### Opening the workspace in an editor
 
@@ -184,7 +198,7 @@ Because a `.code-workspace` file decides which directories this session may writ
 | Editor family | `lib/editor.js` | Which VS Code-family editor this host holds (proved, never assumed), the child environment an Electron editor needs, and a launch whose success is decoupled from the editor's lifetime |
 | Editor icon | `lib/editor-icon.js` | One executable's associated icon for the family entries no shipped route serves; verified payload or nothing |
 | Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor endpoints |
-| Client | `lib/client.js` | Session header button, session-creation dock chip, overlay panel, the "Open In…" takeover, `@` companion group |
+| Client | `lib/client.js` | The Conversation view page, its header-button fallback (degraded compositions only), the session-creation dock chip and its popover, the "Open In…" takeover, `@` companion group |
 
 - **Discovery**: the session cwd → a recorded file wins; otherwise a directory holding exactly one `.code-workspace` adopts it. Two or more candidates is ambiguous and grants nothing.
 - **Caching**: model 2 s, discovery 3 s, `@` index 4 s. `fs.stat` metadata is deliberately **not** used for invalidation — the fields an `FsInfo` carries are not part of the plugin-facing contract, so a stamp built from them could silently never change and pin a stale root set for a whole session. Panel and command reads always force a fresh parse.
@@ -200,7 +214,7 @@ Because a `.code-workspace` file decides which directories this session may writ
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-Five files, 137 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
+Five files, 148 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), and a minimal React shim on the client side (hooks resolve once per call, function components are expanded recursively, and `useEffect` runs once per mount as React does), so the rendered tree can be inspected and clicks simulated directly.
 
 ```bash
 node test/jsonc.test.mjs            # JSONC parsing and comment-preserving rewrites
@@ -225,6 +239,8 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
 Measured on `0.2.0-rc.2`: **30/30** — the 25 checks it made before the editor feature, plus the five added with it (the served bundle carries the takeover, `codeWorkspace/editors` answers the family, and the two refusals an unknown id must hit). It never launches an editor: both editor calls it makes are refusals by construction.
+
+The Conversation view page is **not covered by that script** (it asserts host endpoints and bundle markers, not rendered UI): its registration, its entry point, its toggle, its degraded no-op and its per-session scoping are pinned by `test/client.test.mjs`. Rendering it inside a real Conversation tab strip has not been observed in a live browser yet.
 
 ---
 

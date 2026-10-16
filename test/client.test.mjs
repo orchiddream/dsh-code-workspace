@@ -2,8 +2,9 @@
  * Client-half behaviour tests, run with no browser, no DSH and no React.
  *
  * The bundle is a hand-written `client-modules` factory: it registers three
- * slots, one `@` source and its own dictionaries, and never renders anything by
- * itself. So the tests
+ * slots, a docked right-Sidebar tab type plus its body (when the composition
+ * carries that Sidebar), one `@` source and its own dictionaries, and never
+ * renders anything by itself. So the tests
  *
  *   1. capture the `window.__ModuleLoader__.load` registration and check its
  *      contract (id, exports, slot specs, dictionary balance);
@@ -25,7 +26,17 @@ const BUNDLE = join(HERE, '..', 'lib', 'client.js')
 
 // ---------------------------------------------------------------- React shim
 
-/** Hooks resolve once per call: enough for a single, deterministic render pass. */
+/**
+ * Hooks resolve once per call: enough for a deterministic render pass.
+ *
+ * `useEffect` is the one hook the shim has to model more carefully. React runs an
+ * effect once per MOUNT, but this shim re-expands a component on every render, so
+ * a naive pass-through would re-run the effect and turn an ordinary re-render
+ * into a second read — a state machine the browser never has. The shim therefore
+ * drains effects once and then ignores them until the test declares a remount
+ * (`markUnmounted`), which is also how a test says "mount it again".
+ */
+const EFFECT = { pending: true, cleanups: [] }
 const reactShim = {
   createElement(type, props) {
     const children = Array.prototype.slice.call(arguments, 2).flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false)
@@ -38,8 +49,10 @@ const reactShim = {
     return [typeof initial === 'function' ? initial() : initial, () => {}]
   },
   useEffect(callback) {
+    if (!EFFECT.pending) return
+    EFFECT.pending = false
     const cleanup = callback()
-    if (typeof cleanup === 'function') CLEANUPS.push(cleanup)
+    if (typeof cleanup === 'function') EFFECT.cleanups.push(cleanup)
   },
   useSyncExternalStore(_subscribe, getSnapshot) {
     return getSnapshot()
@@ -55,6 +68,12 @@ const reactShim = {
   },
 }
 const CLEANUPS = []
+
+/** End the current mount: React would have unmounted the tree, so effects re-arm. */
+function markUnmounted() {
+  EFFECT.cleanups.splice(0).forEach((cleanup) => cleanup())
+  EFFECT.pending = true
+}
 
 // --------------------------------------------------- shipped routes and widgets
 // The menu takeover reads the shipped applications and posts the shipped launch,
@@ -157,7 +176,7 @@ function nodeByKey(vnode, key) {
 // ------------------------------------------------------------------- harness
 
 /** Load the bundle against a fresh fake window and boot it. */
-async function bootClient({ services = {}, requires = {}, dictionaries = [] } = {}) {
+async function bootClient({ services = {}, requires = {}, dictionaries = [], validInjects = [] } = {}) {
   const source = await readFile(BUNDLE, 'utf8')
   // Same realm on purpose: the bundle's own arrays/objects must satisfy
   // `assert.deepStrictEqual`, which a `vm` context's foreign prototypes break.
@@ -191,6 +210,12 @@ async function bootClient({ services = {}, requires = {}, dictionaries = [] } = 
   const triggers = []
   const allDictionaries = dictionaries.slice()
   const effects = []
+  const triggersRegistry = {
+    registerSource(source) {
+      triggers.push(source)
+      return () => {}
+    },
+  }
 
   const ctx = {
     slots: {
@@ -229,17 +254,21 @@ async function bootClient({ services = {}, requires = {}, dictionaries = [] } = 
       return () => {}
     },
     inject(deps, callback) {
-      if (deps.includes('inputTriggers')) {
-        const registry = {
-          registerSource(source) {
-            triggers.push(source)
-            return () => {}
-          },
-        }
-        callback({ inputTriggers: registry, effect: ctx.effect })
+      // Cordis calls the callback exactly when every named service exists — not
+      // earlier, and never with one of them `undefined`. This stub therefore has
+      // to keep the same promise: a scope that always fires would exercise a
+      // branch production cannot reach (and would hand the bundle `undefined`
+      // where production hands it a real service).
+      if (deps.every((dep) => services[dep] !== undefined || validInjects.includes(dep))) {
+        const scope = Object.assign({}, ctx, services, { slots: ctx.slots, effect: ctx.effect })
+        callback(scope)
+      }
+      if (deps.includes('inputTriggers') && !services.inputTriggers) {
+        callback({ inputTriggers: triggersRegistry, effect: ctx.effect })
       }
     },
     get(name) {
+      if (name === 'inputTriggers') return services.inputTriggers || triggersRegistry
       return services[name]
     },
   }
@@ -287,14 +316,61 @@ const STATE = {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-/** Boot the client with both transports wired, and return a render helper. */
-async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionaries = [] } = {}) {
+/**
+ * The layout face a composition with `@deepseek-ai/dsh-client-ui-layout`
+ * publishes: `selectPanel` (which validates a panel id and takes `null` for the
+ * Conversation) and the `panelInfo` selection source the header button reads to
+ * decide whether it is a toggle. `panels` records every selection AND is the
+ * set of ids `selectPanel` accepts.
+ */
+function layoutStub({ panels = ['conversation', 'code-workspace'], active = null, accept = true, refuseSelect = false } = {}) {
+  const selections = []
+  let current = active
+  const listeners = []
+  return {
+    selections,
+    services: {
+      layout: {
+        panelInfo: {
+          getSnapshot: () => ({ activePanelId: current }),
+          subscribe(listener) {
+            listeners.push(listener)
+            return () => {}
+          },
+        },
+        selectPanel(panelId) {
+          if (refuseSelect || (panelId !== null && (!accept || !panels.includes(panelId)))) {
+            throw new Error(`layout.selectPanel: main panel "${panelId}" is not registered`)
+          }
+          selections.push(panelId)
+          current = panelId
+          for (const listener of listeners) listener()
+        },
+      },
+    },
+  }
+}
+
+/**
+ * Boot the client with both transports wired, and return a render helper.
+ *
+ * A layout face is supplied by default, because the panel's page IS a
+ * Conversation view: without one the bundle registers no view cell at all (that
+ * is the degradation the dedicated tests below cover), so every other test here
+ * would be exercising a surface that no longer exists.
+ */
+async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionaries = [], layout: layoutFace = undefined, noLayout = false } = {}) {
+  // A fresh harness is a fresh tree: effects arm again.
+  EFFECT.pending = true
+  EFFECT.cleanups.length = 0
   const rpcLog = []
   const commandLog = []
+  const face = noLayout ? null : (layoutFace || layoutStub())
   const harness = await bootClient({
     requires,
     dictionaries,
     services: {
+      ...(face ? face.services : {}),
       sessions: {
         list: {
           getSnapshot: () => ({
@@ -339,7 +415,8 @@ async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionari
   const header = harness.slot('conversation.session.header.actions')
   const dock = harness.slot('conversation.input.dock')
   const overlay = harness.slot('shell.overlay')
-  return { harness, rpcLog, commandLog, header, dock, overlay }
+  const view = harness.slots.find((entry) => entry.spec.name === 'conversation.view')
+  return { harness, rpcLog, commandLog, header, dock, overlay, view, layout: face }
 }
 
 /** Props the standard kit would inject for a session-scoped entry. */
@@ -366,11 +443,12 @@ test('the bundle registers one factory under the package name and exports name/i
   assert.equal(typeof exportsObject.apply, 'function')
 })
 
-test('apply registers the header action, the dock entry and the overlay panel', async () => {
-  const harness = await bootClient()
+test('apply registers the View tab, the header action, the dock entry and the overlay panel', async () => {
+  const face = layoutStub()
+  const harness = await bootClient({ services: face.services })
   assert.deepEqual(
     harness.slots.map((entry) => entry.spec.name),
-    ['conversation.session.header.actions', 'conversation.input.dock', 'shell.overlay'],
+    ['conversation.session.header.actions', 'conversation.input.dock', 'shell.overlay', 'conversation.view'],
   )
   const header = harness.slot('conversation.session.header.actions').spec
   assert.equal(header.id, 'code-workspace')
@@ -387,6 +465,14 @@ test('apply registers the header action, the dock entry and the overlay panel', 
   const overlay = harness.slot('shell.overlay').spec
   assert.equal(overlay.id, 'code-workspace-panel')
   assert.equal(overlay.order, 110)
+
+  // The Conversation view: a list cell beside Chat (0) and Trajectory (10),
+  // addressed by id because the owner filters the registered entries by it.
+  const view = harness.slot('conversation.view').spec
+  assert.equal(view.id, 'code-workspace')
+  assert.equal(view.order, 30)
+  assert.equal(view.locale, 'code-workspace')
+  assert.equal(view.label(), '代码工作区')
 })
 
 test('the zh and en dictionaries carry exactly the same keys', async () => {
@@ -416,11 +502,9 @@ test('the @ source is registered as a companion group with an identity codec', a
   assert.equal(source.codec.clipboardText('D:/a b/c.ts'), 'D:/a b/c.ts')
 })
 
-test('the session header button opens the panel and fetches state over the command channel', async () => {
-  const { header, commandLog } = await boot()
-  const button = header.component(kit())
-  assert.match(textOf(button), /代码工作区/)
-  button.props.onClick()
+test('the page reads its session state over the command channel', async () => {
+  const { view, commandLog } = await boot()
+  expand(view.component(kit()))
   await flush()
   assert.equal(commandLog.length, 1)
   assert.equal(commandLog[0].sessionId, 'session-1')
@@ -429,12 +513,12 @@ test('the session header button opens the panel and fetches state over the comma
   assert.deepEqual(commandLog[0].attachments, [])
 })
 
-test('the panel renders the file, every folder, and the primary badge', async () => {
-  const { header, overlay } = await boot()
-  header.component(kit()).props.onClick()
+test('the page renders the file, every folder, and the primary badge', async () => {
+  const { view } = await boot()
+  expand(view.component(kit()))
   await flush()
-  const tree = expand(overlay.component({}))
-  assert.ok(tree, 'the overlay must render while the panel is open')
+  const tree = expand(view.component(kit()))
+  assert.ok(tree, 'the View must render while its tab is selected')
   const text = textOf(tree)
   assert.match(text, /D:\/ws\/app\.code-workspace/)
   assert.match(text, /Other/)
@@ -443,9 +527,178 @@ test('the panel renders the file, every folder, and the primary badge', async ()
   assert.match(text, /工作区文件夹/)
 })
 
-test('the overlay renders nothing while the panel is closed', async () => {
+test('the floating panel renders nothing until the creation page opens it', async () => {
   const { overlay } = await boot()
   assert.equal(expand(overlay.component({})), null)
+})
+
+test('a panel addressed to another surface never draws the floating window', async () => {
+  const { view, overlay } = await boot()
+  // A panel scoped to the Conversation page (the shape an older build left open
+  // as a fallback) must not float once the page draws.
+  expand(view.component(kit()))
+  assert.equal(expand(overlay.component({})), null)
+})
+
+test('the page takes the panel over from a popover that was already open', async () => {
+  const { dock, view, overlay } = await boot()
+  // Pick a workspace file on the creation page: that popover is the one surface
+  // a sessionless page has, so it must keep working.
+  expand(dock.component(kit())).children[0].props.onClick()
+  await flush()
+  assert.ok(expand(overlay.component({})), 'the creation-page popover must render')
+  // Then the user opens the page. The popover is the same panel on another
+  // surface, so it must go away rather than float beside its own copy.
+  expand(view.component(kit()))
+  await flush()
+  assert.equal(expand(overlay.component({})), null)
+  assert.match(textOf(expand(view.component(kit()))), /该目录下没有 \.code-workspace 文件/)
+})
+
+// --------------------------------------------------- the Conversation view
+
+test('the panel is a Conversation view, registered beside Chat and Trajectory', async () => {
+  const face = layoutStub()
+  const { view, rpcLog } = await boot({ layout: face })
+  assert.ok(view, 'the panel must register in conversation.view')
+  assert.equal(view.spec.id, 'code-workspace')
+  assert.equal(view.spec.order, 30)
+  assert.equal(view.spec.locale, 'code-workspace')
+  assert.equal(view.spec.label(), '代码工作区')
+  // With no session kit at all (a bare environment) it must still render — the
+  // empty state is a state — and must not read the sessionless state channel.
+  assert.ok(view.component({}))
+  assert.equal(rpcLog.some((call) => call.endpoint === 'codeWorkspace/state'), false)
+})
+
+test('the header button is not rendered at all while the tab strip shows the page', async () => {
+  const face = layoutStub()
+  const { header } = await boot({ layout: face })
+  // Two entry points for one page is noise: the tab is visible for the whole
+  // session, so the header button removes itself.
+  assert.equal(header.component(kit()), null)
+  assert.equal(expand(header.component(kit())), null)
+})
+
+test('the header button still offers the page when the View could not register', async () => {
+  const { header } = await boot({ noLayout: true })
+  const button = header.component(kit())
+  assert.ok(button, 'without a tab to use, the header button is the only way in')
+  assert.match(textOf(button), /代码工作区/)
+})
+
+test('without a layout service the header button opens nothing, never a floating copy', async () => {
+  const { header, overlay, view, commandLog } = await boot({ noLayout: true })
+  assert.equal(view, undefined, 'the view cell is not registered without the layout face')
+  assert.doesNotThrow(() => header.component(kit()).props.onClick())
+  await flush()
+  // No page to show, and deliberately no second surface either: the floating
+  // panel is the creation page's popover, not a fallback for this button.
+  assert.equal(expand(overlay.component({})), null)
+  assert.equal(commandLog.length, 0)
+})
+
+test('a layout that refuses the panel id opens nothing and does not throw', async () => {
+  // The cell registers (the service is present), but `selectPanel` refuses — the
+  // documented behaviour for a panel id the shell has not registered. The tab is
+  // there, so the header button is not drawn; nothing floats instead.
+  const face = layoutStub({ refuseSelect: true })
+  const { header, overlay, commandLog, view } = await boot({ layout: face })
+  assert.equal(header.component(kit()), null, 'the tab exists, so the button is not drawn')
+  assert.equal(expand(overlay.component({})), null)
+  assert.equal(commandLog.length, 0)
+  // The page itself still renders when its tab is selected: only the header
+  // toggle depends on `selectPanel`.
+  assert.ok(view.component(kit()))
+})
+
+test('the View scopes the shared panel store to the session it is drawn for', async () => {
+  const face = layoutStub()
+  const { view, commandLog, rpcLog } = await boot({ layout: face })
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  assert.ok(tree)
+  assert.match(textOf(tree), /D:\/ws\/app\.code-workspace/)
+  assert.match(textOf(tree), /工作区文件夹/)
+  assert.equal(commandLog[0].sessionId, 'session-1')
+  // The View is not the creation page: it must not touch the sessionless channel
+  // for state it can read through the conversation's own command.
+  assert.equal(rpcLog.some((call) => call.endpoint === 'codeWorkspace/state'), false)
+})
+
+test('switching to another session re-addresses the shared store, so no command lands in the wrong conversation', async () => {
+  const face = layoutStub()
+  const { view, commandLog } = await boot({ layout: face })
+  // Both sessions sit in the same container directory, so the container alone
+  // cannot tell them apart — only the view's own session can.
+  const propsFor = (sessionId) => kit({
+    sessionId,
+    useSessions: (selector) => selector({ byId: { 'session-1': { cwd: 'D:/ws' }, 'session-2': { cwd: 'D:/ws' } } }),
+  })
+  const mount = (sessionId) => expand(view.component(propsFor(sessionId)))
+
+  // The View mounted for session 1 already holds session 1's state.
+  expand(view.component(propsFor('session-1')))
+  await flush()
+  assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1'])
+  assert.match(textOf(expand(view.component(propsFor('session-1')))), /D:\/ws\/app\.code-workspace/)
+
+  // The user switches sessions: the owner unmounts the old View and mounts one
+  // for session 2. Every subsequent command — the read AND a mutation — must name
+  // session 2.
+  markUnmounted()
+  expand(view.component(propsFor('session-2')))
+  await flush()
+  assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1', 'session-2'], 'session 2 must be read on its own turn: ' + JSON.stringify(commandLog))
+  const two = expand(view.component(propsFor('session-2')))
+  assert.match(textOf(two), /D:\/ws\/app\.code-workspace/)
+  buttonByTitle(two, '移除').props.onClick()
+  await flush()
+  const remove = commandLog.find((call) => call.line === '/code-workspace remove 0')
+  assert.ok(remove, 'the mutation must be issued')
+  assert.equal(remove.sessionId, 'session-2', 'a mutation must never land in the session that was open before')
+})
+
+test('a re-render never triggers a read, and a remount reads once', async () => {
+  const face = layoutStub()
+  const { view, commandLog } = await boot({ layout: face })
+  expand(view.component(kit()))
+  await flush()
+  assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1'])
+  // React re-renders a mounted View on every state patch; those renders must not
+  // each issue a command.
+  expand(view.component(kit()))
+  await flush()
+  expand(view.component(kit()))
+  await flush()
+  assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1'])
+  // Leaving the tab unmounts it; coming back is the deliberate "show me the
+  // current state" gesture, so that mount reads again.
+  markUnmounted()
+  expand(view.component(kit()))
+  await flush()
+  assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1', 'session-1'])
+})
+
+test('a View with no workspace renders the empty state and still reads its session', async () => {
+  const face = layoutStub()
+  const { view } = await boot({
+    layout: face,
+    services: {
+      sessions: { list: { getSnapshot: () => ({ current: 'session-2', ids: ['session-2'], byId: { 'session-2': { cwd: undefined } } }) } },
+      workspaces: { list: { getSnapshot: () => ({ items: [] }) } },
+    },
+  })
+  // `useContainerDir` reads the view's own session through the standard kit, so
+  // this is the empty state a session without a recorded directory produces.
+  const tree = expand(view.component({
+    sessionId: 'session-2',
+    useSessions: (selector) => selector({ byId: { 'session-2': { cwd: undefined } } }),
+    useWorkspaces: (selector) => selector({ items: [] }),
+  }))
+  assert.ok(tree)
+  assert.match(textOf(tree), /先选择一个工作区目录|未关联/)
 })
 
 test('the dock entry renders only in the hero phase', async () => {
@@ -462,13 +715,13 @@ test('the dock entry renders only in the hero phase', async () => {
   assert.equal(expand(dock.component(past)), null)
 })
 
-test('removing a folder from the panel issues the indexed remove command', async () => {
-  const { header, overlay, commandLog } = await boot()
-  header.component(kit()).props.onClick()
+test('removing a folder from the page issues the indexed remove command', async () => {
+  const { header, view, commandLog } = await boot()
+  expand(view.component(kit()))
   await flush()
-  const tree = expand(overlay.component({}))
-  // The panel's own close button also renders a ✕, so address the row action by
-  // its accessible title instead.
+  const tree = expand(view.component(kit()))
+  // The page's ✕ is gone (the tab strip owns navigation), so address the row
+  // action by its accessible title.
   const remove = buttonByTitle(tree, '移除')
   assert.ok(remove, 'a remove button must exist')
   remove.props.onClick()
@@ -479,20 +732,23 @@ test('removing a folder from the panel issues the indexed remove command', async
 })
 
 test('adding a folder sends the typed path and clears the field', async () => {
-  const { header, overlay, commandLog } = await boot()
-  header.component(kit()).props.onClick()
+  const { header, view, commandLog } = await boot()
+  // The View reads on mount, so the first paint is "busy": settle before driving
+  // its controls, and render again for the state the read produced.
+  expand(view.component(kit()))
   await flush()
-  let tree = expand(overlay.component({}))
+  let tree = expand(view.component(kit()))
   const pathInput = inputsIn(tree).find((input) => input.props.placeholder.includes('文件夹路径'))
-  assert.ok(pathInput)
+  assert.ok(pathInput, 'the folder path field must exist')
   pathInput.props.onChange({ target: { value: 'D:/third' } })
-  tree = expand(overlay.component({}))
+  tree = expand(view.component(kit()))
   const addButton = buttonByLabel(tree, '添加文件夹')
+  assert.equal(typeof addButton.props.onClick, 'function', 'the add control must be enabled once the read settled')
   addButton.props.onClick()
   await flush()
   assert.ok(commandLog.some((call) => call.line === '/code-workspace add "D:/third"'), JSON.stringify(commandLog))
   // The field is cleared optimistically.
-  tree = expand(overlay.component({}))
+  tree = expand(view.component(kit()))
   const cleared = inputsIn(tree).find((input) => input.props.placeholder.includes('文件夹路径'))
   assert.equal(cleared.props.value, '')
 })
@@ -511,13 +767,13 @@ test('on the creation page the panel uses the sessionless channel, not the comma
 })
 
 test('a failed folder mutation surfaces the host message and re-reads state', async () => {
-  const { header, overlay, commandLog } = await boot({
+  const { header, view, commandLog } = await boot({
     onCommand: () => commandOk(STATE),
     onRpc: () => ok(null),
   })
-  header.component(kit()).props.onClick()
+  expand(view.component(kit()))
   await flush()
-  const tree = expand(overlay.component({}))
+  const tree = expand(view.component(kit()))
   buttonByTitle(tree, '移除').props.onClick()
   await flush()
   // One read on open, the mutation, and the read-back after it.
@@ -679,8 +935,8 @@ const DETECTED = {
   platform: 'win32',
 }
 
-test('the panel lists every detected family editor and opens the workspace through the host', async () => {
-  const { header, overlay, rpcLog } = await boot({
+test('the page lists every detected family editor and opens the workspace through the host', async () => {
+  const { header, view, rpcLog } = await boot({
     onRpc: (endpoint) => {
       if (endpoint === 'codeWorkspace/editors') return ok(DETECTED)
       if (endpoint === 'codeWorkspace/openInEditor') {
@@ -689,9 +945,9 @@ test('the panel lists every detected family editor and opens the workspace throu
       return ok(STATE)
     },
   })
-  header.component(kit()).props.onClick()
+  let tree = expand(view.component(kit()))
   await flush()
-  let tree = expand(overlay.component({}))
+  tree = expand(view.component(kit()))
   assert.match(textOf(tree), /在编辑器中打开/)
   const button = buttonByLabel(tree, 'VS Code')
   assert.ok(button, 'a button per detected editor must exist')
@@ -703,13 +959,13 @@ test('the panel lists every detected family editor and opens the workspace throu
   const call = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/openInEditor')
   assert.deepEqual(call.args, { containerDir: 'D:/ws', editorId: 'vscode' })
   // The host's own answer is surfaced, naming the editor and the file it opened.
-  tree = expand(overlay.component({}))
+  tree = expand(view.component(kit()))
   assert.match(textOf(tree), /已用 VS Code 打开/)
   assert.match(textOf(tree), /app\.code-workspace/)
 })
 
 test('a host failure on open is surfaced as the host message, not swallowed', async () => {
-  const { header, overlay } = await boot({
+  const { header, view } = await boot({
     onRpc: (endpoint) => {
       if (endpoint === 'codeWorkspace/editors') return ok(DETECTED)
       if (endpoint === 'codeWorkspace/openInEditor') {
@@ -718,27 +974,27 @@ test('a host failure on open is surfaced as the host message, not swallowed', as
       return ok(STATE)
     },
   })
-  header.component(kit()).props.onClick()
+  expand(view.component(kit()))
   await flush()
-  buttonByLabel(expand(overlay.component({})), 'Trae CN').props.onClick()
+  buttonByLabel(expand(view.component(kit())), 'Trae CN').props.onClick()
   await flush()
-  assert.match(textOf(expand(overlay.component({}))), /the editor refused to start/)
+  assert.match(textOf(expand(view.component(kit()))), /the editor refused to start/)
 })
 
-test('without an editor the panel says so, and an SSH session says why', async () => {
-  const { header, overlay } = await boot({
+test('without an editor the page says so, and an SSH session says why', async () => {
+  const { header, view } = await boot({
     onRpc: (endpoint) => (endpoint === 'codeWorkspace/editors' ? ok({ editors: [], preferred: null, ssh: false, platform: 'win32' }) : ok(STATE)),
   })
-  header.component(kit()).props.onClick()
+  expand(view.component(kit()))
   await flush()
-  assert.match(textOf(expand(overlay.component({}))), /未检测到 VS Code 系列编辑器/)
+  assert.match(textOf(expand(view.component(kit()))), /未检测到 VS Code 系列编辑器/)
 
   const ssh = await boot({
     onRpc: (endpoint) => (endpoint === 'codeWorkspace/editors' ? ok({ editors: [], preferred: null, ssh: true, platform: 'win32' }) : ok(STATE)),
   })
-  ssh.header.component(kit()).props.onClick()
+  expand(ssh.view.component(kit()))
   await flush()
-  assert.match(textOf(expand(ssh.overlay.component({}))), /通过 SSH 访问/)
+  assert.match(textOf(expand(ssh.view.component(kit()))), /通过 SSH 访问/)
 })
 
 test('the family takes over the shipped cell at a lower priority, and is skipped without the primitives', async () => {

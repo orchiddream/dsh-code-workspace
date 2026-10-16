@@ -42,7 +42,7 @@ Consequences that follow from this and are not bugs:
 | Editor family | `lib/editor.js` | Which VS Code-family editor this host holds, the child environment, the launch |
 | Editor icon | `lib/editor-icon.js` | Associated-icon extraction for the family entries no shipped route serves |
 | Host | `lib/index.js` | Discovery, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor endpoints |
-| Client | `lib/client.js` | Session header button, session-creation dock chip, overlay panel, "Open In…" takeover, `@` companion group |
+| Client | `lib/client.js` | The Conversation view page, its header-button fallback for degraded compositions, session-creation dock chip and its popover, "Open In…" takeover, `@` companion group |
 
 ## Why the writer is surgical
 
@@ -170,6 +170,71 @@ produces for a non-first-party producer.
 `agent/created` is an awaited `serial` event, so its handler returns the hydration
 promise — that is what guarantees the very first prompt assembly already lists the
 folders.
+
+## The panel's surface: a Conversation view
+
+The panel used to have exactly one surface: a fixed-size floating overlay. Managing the
+folders while reading the conversation it affects is the actual job, and a floating box
+that covers the conversation — anchored, fixed width, with its own scrollbar — is the
+worst shape for it.
+
+A **docked right-Sidebar page** was tried first and rejected: the right column is narrow,
+its content is not the conversation's width, and the workspace form's action rows wrapped
+into a heap. The surface the product already has for "another full page inside this
+conversation" is the Conversation's own tab strip, so the panel is a **Conversation view**
+now — one tab beside Chat / Trajectory / Git. The floating panel survives only as the
+creation page's popover, where there is no session to host a tab.
+
+The mechanism is the owner's own list slot:
+
+```js
+ctx.slots.register({ name: 'conversation.view', id: 'code-workspace', order: 30,
+                     label: () => t('title.tab'), locale: NS }, WorkspaceView)
+```
+
+`conversation.view` is a `list` slot (scope `session`, `replaceRisk: none`), and the owner
+builds the strip by walking its entries and renders exactly one entry at a time by id —
+which is why the shipped Chat and Trajectory views are registered the same way, and why a
+single registration is enough. Order 30 puts this tab after Chat (0) and Trajectory (10).
+
+Three consequences are load-bearing:
+
+- **The registration is gated on the layout service, and it waits for it.** `ctx.layout`
+  is the same package's face: it declares the slot, and `selectPanel` is the only way to
+  select a view. A composition without it has no tab strip to join, and registering into an
+  undeclared slot throws — so the cell is registered from inside `ctx.inject(['layout'], …)`
+  rather than read once at apply time. That is also why the gate is a wait and not a
+  one-shot `ctx.get`: loader rows activate in dependency order, and an early read would
+  cache `undefined` for the plugin's whole life.
+- **The view is per session, and the page obeys that.** The owner hands each entry the
+  standard session kit, so the page addresses `props.sessionId` and resolves that
+  session's `cwd`. The store is shared with the overlay, so the view re-scopes it before
+  rendering — otherwise a panel left on one session would address another after a switch,
+  and the `/code-workspace` command would land in the wrong conversation. A session change
+  also drops the previous session's state: those folders belong to a conversation the page
+  is no longer showing.
+- **One read per mount, with no window.** React mounts a view when its tab is selected and
+  unmounts it when the user leaves, so mounting *is* the deliberate "show me the current
+  state" gesture; the ⟳ button re-reads without a remount. This is deliberately simpler
+  than the read window the docked page needed — an always-mounted tab could be remounted
+  by its neighbours, and the window that fixed that had to be keyed by session, which is
+  exactly the kind of state that grows into a bug.
+
+**The tab is the entry point, and the header button is the degraded one.** A tab is visible
+for the whole session, so a header button beside it is a second entry point for one page —
+noise, and the source of the bug where a click showed the page *and* a floating copy of it.
+The button therefore renders only when `conversation.view` did not register (no layout
+service, so no tab strip to join); in every ordinary composition it removes itself. It still
+navigates through `ctx.layout.selectPanel` and reads `ctx.layout.panelInfo` so it can act as
+a toggle, and `selectPanel`'s throw for an unregistered panel id is caught and changes
+nothing.
+
+**The overlay is not this button's fallback.** It was, and the fallback was wrong: the two
+surfaces share one store but not one visibility rule, so a click could leave the page and a
+floating copy of it on screen together. The floating panel is now only the creation page's
+popover — the one place a workspace file can be picked before a session exists — and it
+renders only when the store says the creation page opened it. Opening the page takes the
+panel over from that popover rather than sharing the screen with it.
 
 ## Sessionless remote API
 
@@ -346,6 +411,12 @@ one `dsh-multi-folder` carries for its config file.
   The panel also registers in `shell.overlay` (a click-through layer, so it opts back
   into pointer events). `conversation.hero.workspaceExtras` exists in some upstream
   builds but not in `0.2.0-rc.2`, so it is deliberately not used.
+- **The View rests on the Conversation's own slot and on the layout service.** The cell is
+  registered in `conversation.view` (declared by `client-ui-conversation`) and selected
+  through `ctx.layout`; the registration is gated on the layout face, so a composition
+  without a Conversation keeps the overlay as the panel's only surface instead of losing
+  the feature. The view is also per session by construction: there is no cross-session
+  page, and the creation page (no session yet) stays on the floating popover.
 - **`uiWorkspace.openWorkspace` is optional.** Without it the plugin still registers
   the container directory and states so in the panel; the user picks the workspace in
   the picker.
@@ -373,7 +444,7 @@ one `dsh-multi-folder` carries for its config file.
 ## Tests
 
 `test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (22), `test/host.test.mjs`
-(43), `test/client.test.mjs` (25) and `test/editor.test.mjs` (22) run with no DSH
+(43), `test/client.test.mjs` (36) and `test/editor.test.mjs` (22) run with no DSH
 runtime. The host tests use a fake `fs` seam, `systemPrompt`, `commands` registry and
 `shell`/`jobs`; the editor tests inject the platform, environment, registry reader,
 `PATH` lookup and file probe, and hand `launchEditor` a child-process double, so a test

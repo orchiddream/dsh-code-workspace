@@ -210,6 +210,23 @@ ctx.slots.register(options, component): () => void
 - 注册进**未声明的 slot 会抛错**，`slots.inject` 就是这个「等声明」的机制（`asar:.../dsh-client-ui-slots/lib/index.js:163-165`：`slot "..." is not declared`）。
 - 参考实现一律写 `slots.inject(name, () => slots.register({ name, ... }, Component))`（`MF_CLIENT:1427-1431` 等）。
 
+### 3.1.1 `conversation.view`：中央栏「对话 / 轨迹 / Git」那一排页签
+
+**结论：那排页签不是槽位渲染出来的，而是 owner 遍历 `conversation.view` 的注册项拼出来的。** 想在它旁边加一个页签，只需注册这一个 list 槽位，不必（也无法）改页签条本身。
+
+| 事实 | 证据 |
+| --- | --- |
+| 槽位：`kind: "list"`、`scope: "session"`、`replaceRisk: "none"`，`registerOptions` 只要 `id`（必需）、`order`、`label`；现有占用者 `ChatView id 'chat'`、`TrajectoryView id 'trajectory'` | 目录 `asar:.../dsh-cordis-client-runner/lib/client.js:3722-3771` |
+| 声明方是 `conversation.session` 这个单槽位条目（`children: { "conversation.view": { kind: "list", scope: "session" } }`），它自己在 `main` 的 `conversation` key 下 | `asar:.../dsh-client-ui-conversation/lib/client.js:18209-18214`、`:18435-18450` |
+| 页签列表 = `slots.entries("conversation.view")` 逐项投影 `{ id, label: resolveSlotLabel(options.label) }`，只额外过滤 `trajectory`（受 developerTools 开关控制）；`slots.subscribe` 与语言切换都会重建它 | `:17972-17984`、`:18003-18015` |
+| 正文 = `renderSlot("conversation.view", ownerProps, { only: viewId })`，`viewId` 取当前 active view 的 id；**一次只渲染一个** | `:16412-16421` |
+| 选中 = `uiConversation.binding(sessionId).activate(viewId)`，入口是 owner 的 `openView`（外部插件不该直接调），它只检查该 id 是否在页签列表里 | `:17985-17988`、`:18217-18221` |
+| 正文组件收到 **标准 kit**（含 `sessionId`、`useSessions`、`useConversation`…）加 owner share `{ inspectCall, viewRequest, openView, completeViewRequest }` | 目录 `:3747-3765` |
+| 空会话不渲染：`session.blank` 且仍处 blank 阶段时 `ConversationViewArea` 直接返回 null | `:16411` |
+| `ctx.uiConversation.views.register({ target, … })` 是**另一个**注册表（target snapshot builder / `toolCallFocus`），**不是**页签来源；不注册它也能让页签出现并渲染 | 实现 `:2874-2885`；Chat 与 Trajectory 各自注册自己的 definition（`ui-chat:8862`、`ui-trajectory:1645`） |
+
+导航走 `ctx.layout`（`dsh-client-ui-layout` `:444-489`）：`selectPanel(id)` 在 id 未注册时**抛错**（`:463`），传 `null` 表示回到对话；`panelInfo` 是共享的选中态来源（`{ getSnapshot, subscribe }`），`usePanelInfo` 读的是同一个来源。
+
 ### 3.2 `register` 描述符的全部字段
 
 `register` 接受的字段（实现见 `asar:.../dsh-client-ui-slots/lib/index.js:163-231`，用户文档见 `:3011-3027` 一类的 slot 目录条目）：
@@ -584,7 +601,21 @@ call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal):
 | `slots.registerFactory(options, component)` | 可复用组装体（本次任务不涉及） | 目录 `:1371-1381` |
 | `slots.entries(key)` / `entriesOfSlot(key)` / `spec(key)` / `subscribe(key, fn)` / `getVersion(key)` / `snapshot(root)` / `onEntryError(fn)` | 只读检视面 | 实现 `asar:.../dsh-client-ui-renderer/lib/client.js:1517-1576` |
 
-### 7.8 slot 组件实际收到的 props（标准 kit）
+### 7.8 `sidebarRightTabs` / `sidebarRight`（右侧栏的页类型与导航）
+
+两个服务由 `@deepseek-ai/dsh-client-ui-sidebar-right` 在同一个 effect 内 `ctx.reflect.provide`（实现 `asar:dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right/lib/client.js:9073-9074`）。它们**不是**伴随 `dsh-base` 必然出现的服务，所以必须用软注入 `ctx.inject(['sidebarRightTabs','sidebarRight'], …)`：组合里没有右侧栏时回调根本不触发，插件退回浮层而不是整块失效。
+
+| 成员 | 形状 | 证据 |
+| --- | --- | --- |
+| `sidebarRightTabs.register(definition)` | `{ id, kind, patterns?, priority?, canOpen?, title, guide?, keepMounted? }` → disposer。`id` 是全注册表唯一的实现身份，**同时是正文与标题注册时用的 key**；页类型不给 `patterns`，按 kind 打开；一个 `kind` 最多一份 `builtin` + 一份 `extension`（extension 生效） | README.zh `:83`；`guideDefinition` 例 `:8948-8955` |
+| `sidebarRight.openTab(kind, options?)` | 在当前屏会话的活跃停靠格里打开/聚焦该 kind 的页；`placeTab` 对未注册 kind **throw** | `:6394-6397`、`:6449-6458` |
+| `sidebarRight.openTabFromTarget(kind, target)` | 按「捕获的格/页」打开：浮窗里同类页聚焦，`guide` 页被替换；`commandTarget(element)` 捕获目标，未挂载会话面时两者都不动作 | `:6546-6583` |
+| `sidebarRight.openResource(address, options?)` / `openResourceIn(sessionId, …)` | 资源地址路径（`dsh-resource://…`），由注册表按 glob 认领 | `:6385-6408` |
+| 未挂载会话面时调用 `openTab` | **抛** `sidebarRight: no session surface is mounted` —— 这是状态不是故障，调用方应当捕获并走兜底 | `:6744-6752` |
+
+正文注册：`ctx.slots.register({ name: 'sidebar.right.pane.tab', key: definition.id }, Body)`（keyed / session，目录 `asar:.../dsh-cordis-client-runner/lib/client.js:5113-5160`），可选标题注册在 `sidebar.right.pane.tab.title`（同 key）。**session 地址从 `useTabInfo()` 取**（`const { tab } = useTabInfo()`），不是平铺 owner props；参考实现 `sidebar-files` 的 `FilesBody` 与 `FilesTitle` 都这么读（`.../dsh-client-ui-sidebar-files/lib/client.js:595-596`、`:725-726`），其类型注册与正文注册见同文件 `:996`、`:1003-1017`。
+
+### 7.9 slot 组件实际收到的 props（标准 kit）
 
 除 owner share 外，session scope 的标准 kit 固定包含（`asar:.../dsh-cordis-client-runner/lib/client.js:3031-3046` 的 slot 目录一致列出）：
 

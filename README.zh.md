@@ -83,13 +83,16 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 
 ### 打开一个工作区
 
-三种入口，效果相同：
+三个入口，读写的是同一个工作区文件（打开的面板形态不同，见下）：
 
 | 入口 | 位置 |
 | --- | --- |
-| **新建会话页** | 输入框上方的「代码工作区」胶囊（与 git 分支胶囊同一条 dock 带） |
-| **会话头部** | 会话标题栏的「代码工作区」按钮 |
+| **新建会话页** | 输入框上方的「代码工作区」胶囊（与 git 分支胶囊同一条 dock 带）；它开的是浮动弹出面板，因为这一页还没有会话 |
+| **页签** | 中央栏顶部「对话 / 轨迹 / Git」旁边那枚「代码工作区」页签——它会话期间一直在，这就是主要入口 |
+| **会话头部（仅降级组合）** | 标题栏的「◆ 代码工作区」按钮：只在页签没能注册的组合里出现（见「面板」） |
 | **斜杠命令** | `/code-workspace use <路径>` |
+
+**页签就是入口**：它会话期间一直可见，所以再放一个头部按钮就是同一个页面的第二个入口，既多余、又正是「页面和浮着的副本同时出现」那个 bug 的来源。因此头部按钮只在 `conversation.view` 没能注册时渲染（例如组合里没有布局服务，没有可加入的页签条）；那种组合下它用 `ctx.layout.selectPanel('code-workspace')` 打开页面、已经在那一页时用 `selectPanel(null)` 回到「对话」，并且**没有浮层降级**——打不开就什么都不做，不再弹浮窗。
 
 面板里可以「切换文件」浏览目录树挑选 `.code-workspace`，或「新建工作区文件」。选定后面板会调用 `workspaceRegistry.create()` 把容器目录注册为 DSH 工作区，并（若客户端组合提供了 `uiWorkspace`）直接把会话切到该工作区。
 
@@ -113,7 +116,7 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 
 ### 面板
 
-会话头部按钮或新建会话页胶囊打开。面板显示工作区文件路径、每个 folder（显示名、真实路径、主目录/不存在标记），并提供：
+页面就是中央栏顶部那枚「代码工作区」页签（会话期间一直在）；新建会话页胶囊打开浮动面板（`shell.overlay`）。两种形态共用**同一个面板主体**，显示的内容与操作完全一致：工作区文件路径、每个 folder（显示名、真实路径、主目录/不存在标记），以及：
 
 - **添加文件夹**：输入相对或绝对路径，可带显示名；不存在或不是目录会被拒绝
 - **上移 / 下移**：调整 `folders` 顺序
@@ -122,6 +125,19 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 - **在资源管理器中显示**
 - **在编辑器中打开**：本机能证明存在的每个 VS Code 家族编辑器一个按钮（见下）
 - **切换文件** / **最近使用** / **新建工作区文件** / **取消关联**
+
+#### 对话视图（中央栏页签）
+
+页面作为 `conversation.view` 槽位里的一格注册：`slots.register({ name: 'conversation.view', id: 'code-workspace', order: 30, label: () => '代码工作区', locale: NS }, WorkspaceView)`。这个槽位就是中央栏顶部那条「对话 / 轨迹 / Git」页签条背后的清单槽——属主（client-ui-conversation）遍历槽位里的条目生成页签，并按 id 一次只渲染一个，所以**一次注册就够了**；order 30 排在自带的「对话」（0）与「轨迹」（10）之后。切成这一页后：
+
+- 页面占满「对话」自己的视图区，不再有第二个栏：内容收在「对话」正文那同一列阅读宽度里（取 `--dsh-chat-content-width` 这个令牌，未定义时有兜底默认值；一张工作区表单拉满宽窗口很难读），超出的部分由页面内部滚动。
+- 关闭由页签条负责，所以这一页**不带标题栏的 ✕**，取而代之的是一行提示：「工作区是「对话 / 轨迹 / Git」旁边的一个页签；点回「对话」即可继续聊天。」标题「代码工作区」旁的 ⟳ 刷新按钮保留，和浮动面板里一样。
+- 页面是**按会话**的：属主把标准的 session kit 交给这一格，所以页面读 `props.sessionId` 与那个会话的 `cwd`。会话切换会把这份共享的面板状态重新指向新会话，并丢掉上一个会话的状态——否则在会话 A 打开、切到会话 B 之后，`/code-workspace` 就会打进另一个对话。
+- React 在这一页的页签被选中时挂载它、用户离开时卸载它，所以每次挂载读一次就正是「把当前状态给我看」；不再有读窗口或节流。要强制重读，用 ⟳。
+
+两种形态的差异只有标题栏这一处：对话视图由页签条负责关闭，浮层面板（`shell.overlay`）保留 ✕。**浮层不是对话视图的降级路径**：浮层只留给新建会话页——那里还没有会话，只能用浮动弹出面板挑 `.code-workspace` 文件；它只在 store 标记为「由创建页打开」时绘制，别处的面板状态画不出它来。打开对话视图时还会顺手把创建页那个浮层收掉，所以同一个面板不会同屏出现两次。
+
+**已知边界**：对话视图需要会话——属主交来的 session kit 是它取容器目录的唯一来源（`props.sessionId` → 该会话的 `cwd`），所以新建会话页（还没有会话）用不了它，只能用浮动弹出面板。这一页同时落在上游两件事上：`conversation.view` 槽位让它被页签条认领，`ctx.layout`（也就是声明这个槽位的包）负责选中它。没有布局服务时这一格完全不注册，那时才会渲染会话头部按钮作为降级入口；即使注册成功，`selectPanel` 若拒绝这个 id，按钮点击也只是不生效。
 
 ### 在编辑器中打开工作区
 
@@ -185,10 +201,10 @@ DSH 沙箱（Windows ACL runner）为每个进程树只授予**一个**工作区
 | 编辑器家族 | `lib/editor.js` | 本机装了哪些 VS Code 家族编辑器（一律先证明、不假设）、Electron 编辑器需要的子进程环境、以及「启动成功」与「编辑器存活」解耦的启动逻辑 |
 | 编辑器图标 | `lib/editor-icon.js` | 官方没有图标路由的家族成员，从可执行文件提取关联图标；产物校验不通过就当作没有 |
 | 宿主 | `lib/index.js` | 发现与缓存、`tools/execute` 重根拦截、提示词注入、通知、`/code-workspace` 命令、无会话 `codeWorkspace/*` 远程 API、`@` 发现、编辑器端点 |
-| 客户端 | `lib/client.js` | 会话头部按钮、新建会话页 dock 胶囊、浮层面板、「Open In…」接管、`@` 同伴分组 |
+| 客户端 | `lib/client.js` | `conversation.view` 的页签本体、仅在降级组合里出现的会话头部按钮、新建会话页 dock 胶囊与它的浮层面板、「Open In…」接管、`@` 同伴分组 |
 
 - **发现**：会话 cwd 目录 → 已记录的文件（指针）优先，否则「恰好一个 `.code-workspace`」自动采用；两个及以上视为歧义，不生效。
-- **缓存**：模型 2s、目录发现 3s、`@` 索引 4s。刻意**不用 `fs.stat` 元数据**做失效判断——`FsInfo` 的字段不属于插件面向的契约，用不靠谱的字段做戳可能永远不变化，把根集合钉死整个会话。面板与命令的读取一律强制重读。
+- **缓存**：模型 2s、目录发现 3s、`@` 索引 4s。刻意**不用 `fs.stat` 元数据**做失效判断——`FsInfo` 的字段不属于插件面向的契约，用不靠谱的字段做戳可能永远不变化，把根集合钉死整个会话。面板与命令的读取一律强制重读；对话视图随页签被选中而挂载、用户离开而卸载，每次挂载读一次就正是「把当前状态给我看」，不再有客户端读窗口或节流。
 - **拦截**：`write` / `edit` / `pwsh` / `bash` 的目标落在附加根内时，用 `{ ...standingPolicy, workspaceRoot: <该根> }` 直接执行，**不改 mode**，所以 `read-only` 依旧拒绝、`workspace-write` 放行、`danger-full-access` 放行。后台命令按同样策略注册到 `ctx.jobs`。
 - **无会话通道**：`ctx.provide('codeWorkspace', api)` + 手写 `src-json` Typert 描述符，按**路径**而非 session id 取参，所以还没有会话的新建会话页也能读写工作区文件。
 - **打开编辑器**：`codeWorkspace/editors` 报告本机能证明的家族（懒解析一次并缓存，SSH 会话直接判空）；`codeWorkspace/openInEditor` 取会话目录、解析出该目录的工作区文件，然后以 `<编辑器> <文件>`（没有文件时退回 `<编辑器> <目录>`）detached 启动。图标经 `codeWorkspace/editorIcon` 以 data URL 内联返回，因此本插件不需要自己的 HTTP 路由，也就不必再引入 `webServer` / `connection` 依赖。
@@ -202,13 +218,13 @@ DSH 沙箱（Windows ACL runner）为每个进程树只授予**一个**工作区
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-五个测试文件，共 137 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入），客户端用最小 React shim（hook 单次求值 + 递归展开函数组件），所以可以直接检查渲染树并模拟点击。
+五个测试文件，共 148 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入），客户端用最小 React shim（hook 单次求值、递归展开函数组件，并像 React 一样让 `useEffect` 每次挂载只跑一次），所以可以直接检查渲染树并模拟点击。
 
 ```bash
 node test/jsonc.test.mjs            # JSONC 解析与注释保留改写
 node test/workspace-file.test.mjs   # VS Code 路径规则与 folders 增删改
 node test/host.test.mjs             # 发现、拦截重根、拒绝、命令、远程 API、@ 发现、编辑器守卫
-node test/client.test.mjs           # bundle 契约、槽位注册、面板交互、Open In… 接管、@ 源
+node test/client.test.mjs           # bundle 契约、槽位注册、面板交互、对话视图（conversation.view）与无布局服务时的不动作、Open In… 接管、@ 源
 node test/editor.test.mjs           # 家族解析、先证明再启动、子进程环境、启动结果、图标
 ```
 
@@ -227,6 +243,8 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
 本机 `0.2.0-rc.2` 实测 **30/30**：编辑器功能加入前的 25 项，加上随它新增的 5 项（bundle 里带上了接管、`codeWorkspace/editors` 答出家族、未知 id 必须撞上的两条拒绝）。脚本不会启动任何编辑器——它发的两次编辑器调用按构造都是拒绝。
+
+这个脚本**不覆盖浏览器里画出来的面板**：它断言的是宿主端点和 bundle 标记，不是渲染出来的界面。对话视图的页面注册、入口切换、无布局服务时不动作与会话归属由 `test/client.test.mjs` 钉住；这一页在真实中央栏里画出来的样子**尚未在浏览器中实测**。
 
 ---
 
