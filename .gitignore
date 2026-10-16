@@ -1,0 +1,6 @@
+# dsh-code-workspace — zero-build plugin: `lib/` IS the source, never ignore it.
+node_modules/
+.pnpm-store/
+.verify/
+.scratch/
+*.log
