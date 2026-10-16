@@ -308,7 +308,7 @@ const commandOk = (state) => ({
 })
 
 const STATE = {
-  containerDir: 'D:/ws',
+  rootDir: 'D:/ws',
   file: 'D:/ws/app.code-workspace',
   title: 'app',
   exists: true,
@@ -707,7 +707,7 @@ test('a stale record can be removed from the list, and the file itself is not to
   const { panel, confirmations } = await boot({
     onRpc: (endpoint, args) => {
       if (endpoint === 'codeWorkspace/recent') {
-        return ok({ files: [{ file: 'D:/gone/old.code-workspace', containerDir: 'D:/gone', title: 'old', exists: false, missing: true }] })
+        return ok({ files: [{ file: 'D:/gone/old.code-workspace', rootDir: 'D:/gone', title: 'old', exists: false, missing: true }] })
       }
       if (endpoint === 'codeWorkspace/forgetFile') {
         calls.push(args.file)
@@ -822,10 +822,13 @@ test('the sidebar page is a manager: it lists every workspace it knows, and mark
       if (endpoint === 'codeWorkspace/recent') {
         return ok({
           files: [
-            { file: 'D:/ws/app.code-workspace', containerDir: 'D:/ws', title: 'app', exists: true, missing: false },
+            // The host's own shape: a recent record carries the FILE's directory
+            // (`fileDir`), never a root — the root is what the file derives, and
+            // a record that claimed one would be inventing an association.
+            { file: 'D:/ws/app.code-workspace', fileDir: 'D:/ws', title: 'app', exists: true, missing: false },
             // Recorded but gone: the host probes every file, and a manager that
             // silently dropped it would hide that it disappeared.
-            { file: 'D:/gone/old.code-workspace', containerDir: 'D:/gone', title: 'old', exists: false, missing: true },
+            { file: 'D:/gone/old.code-workspace', fileDir: 'D:/gone', title: 'old', exists: false, missing: true },
           ],
         })
       }
@@ -853,7 +856,7 @@ test('choosing a listed workspace opens it, which is how a session moves between
   const { panel } = await boot({
     onRpc: (endpoint, args) => {
       if (endpoint === 'codeWorkspace/recent') {
-        return ok({ files: [{ file: 'D:/other/team.code-workspace', containerDir: 'D:/other', title: 'team', exists: true, missing: false }] })
+        return ok({ files: [{ file: 'D:/other/team.code-workspace', rootDir: 'D:/other', title: 'team', exists: true, missing: false }] })
       }
       if (endpoint === 'codeWorkspace/open') {
         opened.push(args.file)
@@ -913,7 +916,7 @@ test('the browser offers the host file dialog, and a chosen file is opened as a 
     truncated: false,
   }
   const opened = []
-  const { view } = await boot({
+  const { view, commandLog } = await boot({
     onRpc: (endpoint, args) => {
       if (endpoint === 'codeWorkspace/browse') return ok(listing)
       if (endpoint === 'codeWorkspace/pickFile') return ok({ outcome: 'picked', path: 'D:/ws/app.code-workspace' })
@@ -925,6 +928,10 @@ test('the browser offers the host file dialog, and a chosen file is opened as a 
       if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
       return ok(STATE)
     },
+    // A pick made INSIDE a session rides the command channel, so the host can
+    // attribute the choice to this session rather than to the directory.
+    onCommand: (line) =>
+      line.indexOf('use ') === 0 ? commandOk(Object.assign({}, STATE, { workspace: { id: 'w9', path: 'D:/ws', title: 'app' } })) : undefined,
   })
   expand(view.component(kit()))
   await flush()
@@ -938,7 +945,48 @@ test('the browser offers the host file dialog, and a chosen file is opened as a 
   assert.ok(native, 'the host file dialog must be offered — tree: ' + textOf(browseTree))
   native.props.onClick()
   await flush()
-  assert.deepEqual(opened, ['D:/ws/app.code-workspace'])
+  assert.deepEqual(opened, [])
+  // The panel's own read rides the same channel, so pick the line by spelling.
+  const uses = commandLog.filter((entry) => entry.line.indexOf('/code-workspace use ') === 0)
+  assert.equal(uses.length, 1)
+  assert.equal(uses[0].sessionId, 'session-1')
+  assert.equal(uses[0].line, '/code-workspace use "D:/ws/app.code-workspace"')
+})
+
+test('a workspace file folder is where "pick another file" starts once one is associated', async () => {
+  // The file lives in D:/home/workspace while the session is rooted at
+  // D:/home/api: starting the browser at the root would make a user who keeps
+  // their workspace files together navigate back on every switch.
+  const nested = Object.assign({}, STATE, {
+    rootDir: 'D:/home/api',
+    fileDir: 'D:/home/workspace',
+    file: 'D:/home/workspace/api.code-workspace',
+  })
+  const listing = { path: 'D:/home/workspace', parent: 'D:/home', home: 'C:/Users/edy', entries: [], truncated: false }
+  const { view, rpcLog } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/browse') return ok(listing)
+      if (endpoint === 'codeWorkspace/pickFile') return ok({ outcome: 'cancelled' })
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(nested)
+    },
+    onCommand: () => commandOk(nested),
+  })
+  expand(view.component(kit()))
+  await flush()
+  // "Switch file" in the file section opens the browser at the FILE's folder...
+  buttonByLabel(expand(view.component(kit())), '切换文件').props.onClick()
+  await flush()
+  const browse = rpcLog.filter((entry) => entry.endpoint === 'codeWorkspace/browse')
+  assert.ok(browse.length > 0, 'the browser must have been opened')
+  assert.equal(browse.at(-1).args.path, 'D:/home/workspace')
+
+  // ...and the host dialog offered beside it starts there too.
+  buttonByLabel(expand(view.component(kit())), '从资源管理器选择').props.onClick()
+  await flush()
+  const pick = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/pickFile')
+  assert.deepEqual(pick.args, { cwd: 'D:/home/workspace' })
 })
 
 test('a host that cannot show the dialog says so once, and the browser stays usable', async () => {
@@ -1034,7 +1082,7 @@ test('on the creation page the panel uses the sessionless channel, not the comma
     rpcLog.map((call) => call.endpoint),
     ['codeWorkspace/state', 'codeWorkspace/recent', 'codeWorkspace/editors'],
   )
-  assert.deepEqual(rpcLog[0].args, { containerDir: 'D:/ws' })
+  assert.deepEqual(rpcLog[0].args, { rootDir: 'D:/ws' })
   assert.equal(commandLog.length, 0)
 })
 
@@ -1051,6 +1099,53 @@ test('a failed folder mutation surfaces the host message and re-reads state', as
   // One read on open, the mutation, and the read-back after it.
   assert.ok(commandLog.length >= 3, JSON.stringify(commandLog))
   assert.equal(commandLog.at(-1).line, '/code-workspace list')
+})
+
+test('a root named by several files says so, and offers the other one', async () => {
+  // DSH keys a workspace by its root's canonical path, so these two files ARE
+  // one workspace. The panel must not pretend the switch failed silently.
+  const conflicted = Object.assign({}, STATE, {
+    rootDir: 'D:/p',
+    fileDir: 'D:/lib',
+    file: 'D:/lib/one.code-workspace',
+    conflict: ['D:/lib/two.code-workspace'],
+    roots: [{ index: 0, path: '../p', name: null, label: 'p', resolvedPath: 'D:/p', exists: true, isPrimary: true, relative: '.' }],
+    extraRoots: [],
+  })
+  const opened = []
+  const { view, commandLog } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      if (endpoint === 'codeWorkspace/open') {
+        opened.push(args.file)
+        return ok(conflicted)
+      }
+      return ok(conflicted)
+    },
+    onCommand: (line) => {
+      if (line.indexOf('/code-workspace use ') === 0) return commandOk(conflicted)
+      // The panel's own read rides this channel in session mode.
+      return commandOk(conflicted)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  // The file's own folder is shown even though it is not the root...
+  assert.match(textOf(tree), /文件所在目录 D:\/lib/)
+  // ...and the other file naming this root is listed as a switch target.
+  assert.match(textOf(tree), /同一主目录的其它工作区文件/)
+  assert.match(textOf(tree), /two\.code-workspace/)
+
+  const other = nodeByKey(tree, 'D:/lib/two.code-workspace')
+  assert.ok(other, 'the conflicting file must be clickable — tree: ' + textOf(tree))
+  other.props.onClick()
+  await flush()
+  const uses = commandLog.filter((entry) => entry.line.indexOf('/code-workspace use ') === 0)
+  assert.equal(uses.length, 1)
+  assert.equal(uses[0].line, '/code-workspace use "D:/lib/two.code-workspace"')
+  assert.deepEqual(opened, [])
 })
 
 test('the browser lists directories and workspace files and opens a chosen file', async () => {
@@ -1133,7 +1228,7 @@ test('opening a workspace selects it through uiWorkspace when that service exist
 
 test('@ candidates render rows, and a quoted path keeps its quotes', async () => {
   const payload = {
-    containerDir: 'D:/ws',
+    rootDir: 'D:/ws',
     roots: [],
     candidates: [
       { path: 'D:/other/src/main.ts', rel: 'src/main.ts', rootPath: 'D:/other', rootLabel: 'Other', dir: false, level: false },
@@ -1229,7 +1324,9 @@ test('the page lists every detected family editor and opens the workspace throug
   button.props.onClick()
   await flush()
   const call = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/openInEditor')
-  assert.deepEqual(call.args, { containerDir: 'D:/ws', editorId: 'vscode' })
+  // The session id rides along so a root named by several files opens the one
+  // THIS session is on.
+  assert.deepEqual(call.args, { rootDir: 'D:/ws', editorId: 'vscode', sessionId: 'session-1' })
   // The host's own answer is surfaced, naming the editor and the file it opened.
   tree = expand(view.component(kit()))
   assert.match(textOf(tree), /已用 VS Code 打开/)
@@ -1349,7 +1446,7 @@ test('a family entry opens the workspace through this plugin, every other entry 
   itemButton(expand(cell.component(props)), 'app:trae').props.onClick()
   await flush()
   const own = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/openInEditor')
-  assert.deepEqual(own.args, { containerDir: 'D:/ws', editorId: 'trae' })
+  assert.deepEqual(own.args, { rootDir: 'D:/ws', editorId: 'trae' })
   assert.equal(shippedRoutes.openLog.length, 0)
 
   itemButton(expand(cell.component(props)), 'app:explorer').props.onClick()

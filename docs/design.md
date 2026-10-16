@@ -17,31 +17,165 @@ do not line up directly.
 
 The plugin resolves this the only way that keeps both sides honest:
 
-> **cwd = the directory holding the `.code-workspace` file** (the *container
-> directory*), and every `folders[]` entry is an *additional root*.
+> **cwd = the file's first `folders[]` entry that exists on disk** (the *session
+> root*), and every other `folders[]` entry is an *additional root*.
+
+`lib/workspace-file.js` exports that decision as `deriveRoot(model, fileDir)`: the
+first folder whose `exists` / `isDirectory` probes do not say `false`, in file order;
+when `folders` is empty, or every folder is missing or is not a directory, the answer
+is the file's own directory. `loadModel` probes every folder per load, so a folder the
+user adds in VS Code is seen; the derived root is one field of the load, and the cache
+key is `file + NUL + rootDir` — a file cached for two different roots is two entries.
+Panel and command reads always force a re-parse, so the root is recomputed on every
+such read.
+
+Three names, used consistently everywhere:
+
+| Term | Meaning |
+| --- | --- |
+| **session root** / **root directory** (`rootDir`) | The directory the session is rooted at — the file's first existing folder, or the file's own directory when none qualifies. It is what is handed to `workspaceRegistry.create()` and, through the standing policy, what the sandbox fences against. |
+| **file directory** (`fileDir`) | The directory holding the `.code-workspace` file. It holds the file; it is not the session root. |
+| **additional root** | Every `folders[]` entry except the session root. Never the sandbox root; reachable only through the re-rooting interceptor. |
 
 Consequences that follow from this and are not bugs:
 
 - `workspaceRegistry` gets a real directory, so DSH's own workspace list, session
   grouping and archive logic keep working untouched.
-- The workspace file itself lives in the session cwd, so the user can see and edit it
-  from the same session.
-- A folder that resolves to the container directory is not an "additional" root — it
-  is already the sandbox root. `stateOf()` marks it `isPrimary`; `extraRootsFor()`
-  drops it.
-- A file whose folders are all *outside* the container directory (the common case for
-  a container that only holds the `.code-workspace`) yields additional roots for all
-  of them.
+- The file's own directory is *not* the session root, so a `.code-workspace` file
+  that names only other directories yields an additional root for each of them —
+  and a session rooted at the file's directory is a session with no code in it.
+- A folder that resolves to the session root is not "additional" — it is already the
+  sandbox root. `stateOf()` marks it `isPrimary`; `extraRootsFor()` drops it.
+- The file directory is usually outside the session root, which is why the
+  workspace-file write carries its own policy (see "Writing the workspace file").
+
+### Why the file's own directory is not the root
+
+DSH identifies a Workspace by its canonical path, not by the plugin: two sessions
+whose `cwd` resolves to the same directory are two sessions of one Workspace, and a
+plugin cannot make them two. So if the session root were "the directory holding the
+file", every `.code-workspace` a user keeps in one folder would land on the SAME
+Workspace, and the session would be rooted at a directory that holds no code — the
+exact shape of `D:\home\workspace`, which holds six of them
+(`test/host.test.mjs`, `LIBRARY_FILES`). Deriving the root per file is what keeps
+those files apart: each gets the root it actually names.
+
+The same reasoning retires the old discovery rule ("the recorded file whose
+*directory* is the session directory"). With two files in one folder it returned
+whichever happened to be recorded first — silently granting roots the user never
+chose for that session.
+
+## Associations, and why they are explicit
+
+The store (`<DSH_HOME>/storages/code-workspace/index.json`) is a single JSON file,
+most recent first in every list:
+
+```jsonc
+{
+  "version": 2,
+  "files":    ["…/api.code-workspace", …],   // the UI's recent list
+  "roots":    [{ "root": "D:/home/api", "file": "…" }],
+  "sessions": [{ "session": "session-…", "file": "…" }]
+}
+```
+
+`roots` and `sessions` are the ASSOCIATIONS — which file governs which directory, and
+which file one session picked — and they are kept apart on purpose:
+
+- a root can be named by several files, and the panel has to be able to say *which*
+  ones (`rootRecords` keeps the history, not only the winner);
+- a session can pick a different one of them than its neighbour at the same root, so
+  the per-session pointer must not be collapsed into the per-root record.
+
+Both lists are capped (`MAX_ROOT_RECORDS` / `MAX_SESSION_RECORDS`, 200 each) and the
+caps are applied on write, so a long-lived store cannot grow without limit.
+
+**v1 → v2 migration.** A v1 store (`{ version: 1, files: [...] }`) is read as
+`version: 2` with its `files` intact and both association lists empty. Nothing is
+invented from a file's directory — the guess that made one folder of workspace files
+collapse onto one workspace. The first explicit pick writes the association.
+
+### Resolution order for one session root `C`
+
+`resolveFileForRoot(rootDir, sessionId)` answers in four steps, and the synchronous
+`knownFileSync` mirrors the first three:
+
+1. **The file THIS SESSION picked** (`sessions`). This is why two sessions rooted at
+   `C` can run different folder sets.
+2. **`C`'s most recent explicit record** (`roots`), which is what a brand-new session
+   inherits. A TOMBSTONE (`file: null`) here stops the search entirely.
+3. **Adoption** — `C` holding EXACTLY ONE `*.code-workspace` file. Nothing is
+   ambiguous, and the file is right there.
+4. **Nothing**, which makes the plugin inert for that session: no prompt section, no
+   interception, an empty state.
+
+Two or more files in `C` is therefore a fail-closed tie: it grants nothing until the
+user picks one. That is deliberate. The alternative — "whichever was recorded first" —
+is a silent choice of roots the user never made.
+
+### The tombstone
+
+`forgetRoot` writes `{ root, file: null }` rather than dropping the records. A root
+holding exactly one `.code-workspace` file would otherwise be re-adopted by step 3 on
+the very next read, and the panel's "Unlink" button would look like a button that does
+nothing. The tombstone lasts until the user picks a file for that root again
+(`rememberRoot` removes it as it records the new pick).
+
+**Consequence, stated plainly:** clearing is per-root plus per-session. It drops the
+addressed root's records *for everyone* and this session's own pointer; other sessions
+at that root keep their own `sessions` entries and lose only the shared default, which
+the panel then reports honestly (the root has no file, and the other sessions still
+name one). `forgetFile` is stronger: dropping a file from `files` also drops every
+`roots` and `sessions` record that names it, because leaving them behind would
+re-adopt a record the user just removed.
+
+## The hard limit: two files, one root
+
+DSH's own workspace identity, quoted from
+`@deepseek-ai/dsh-workspace/lib/index.js` (the implementation inside the shipped
+`app.asar`):
+
+- uniqueness is string equality of canonicalized paths: *"uniqueness is string
+  equality of canonicalized paths (a symlink to an existing workspace's directory
+  collides), and attach-time session `cwd` checks go through the same canon"*;
+- `create` canonicalizes through `realpath`, so two spellings — or a symlink and its
+  target — are ONE workspace;
+- `attachSession` rejects a session whose `cwd` does not resolve to exactly the
+  workspace's own canonical path: `if (cwd !== this.record.path) throw new Error(…)`;
+- `sessionIds` is filtered by the same test on every read:
+  `this.record.sessionIds.filter((id) => this.host.sessionPath(id) === this.record.path)`.
+
+Therefore: **two `.code-workspace` files whose first existing folder is the same
+directory ARE one DSH workspace, and no plugin can split them.** Switching between
+them re-points the session's folder set and the prompt; it does not, and cannot,
+create a second workspace, and DSH's workspace list will keep showing one entry.
+
+The plugin's answer is not a fake second workspace. It is four things that are all
+true of the code as it stands:
+
+- a **deterministic per-file root** — the first folder that exists, so two files in one
+  directory land on different roots whenever their folder sets differ
+  (`deriveRoot`);
+- an **explicit per-session association** — the session's own pick outranks the root's
+  record, so two sessions at one root can run different folder sets
+  (`rememberSession` / `sessionFile`);
+- a **fail-closed tie** — no pick and more than one candidate grants nothing
+  (`resolveFileForRoot` steps 3–4);
+- the **duplicate reported** — `conflictFor` lists every other known file naming the
+  same root in the host state's `conflict`, the client renders "other workspace files
+  naming the same root" with one clickable row per file, and the prompt adds "Other
+  .code-workspace files also name `<root>`" so the agent never assumes the folder set
+  it sees is the only one that exists.
 
 ## Planes
 
 | Half | File | Role |
 | --- | --- | --- |
 | Text | `lib/jsonc.js` | JSONC reader; **surgical** single-member writer |
-| Model | `lib/workspace-file.js` | VS Code path rules, folders CRUD, serialization. Pure, no fs |
+| Model | `lib/workspace-file.js` | VS Code path rules, the derived session root (`deriveRoot`), folders CRUD, serialization. Pure, no fs |
 | Editor family | `lib/editor.js` | Which VS Code-family editor this host holds, the child environment, the launch |
 | Editor icon | `lib/editor-icon.js` | Associated-icon extraction for the family entries no shipped route serves |
-| Host | `lib/index.js` | Discovery, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor and file-dialog endpoints |
+| Host | `lib/index.js` | Discovery, the association store, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor and file-dialog endpoints |
 | File dialog | `lib/workspace-picker.js` | The host's native `.code-workspace` file dialog, as the file-shaped sibling of the shipped directory-only picker |
 | Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback for degraded compositions, session-creation dock chip and its popover, "Open In…" takeover, `@` companion group |
 
@@ -65,24 +199,45 @@ brace (a trailing comment) survives. Removing a member takes its comma, or the
 preceding one when it was last. All of this is pinned by `test/jsonc.test.mjs`,
 including a real Trae/VS Code sample file.
 
+## Writing the workspace file
+
+`writeFolders` persists a new `folders` array with its **own explicit policy, rooted at
+the file's own directory**:
+
+```js
+await fs.writeText(await fs.resolve(entry.file), next, undefined, undefined, {
+  mode: 'workspace-write',
+  workspaceRoot: entry.fileDir,
+})
+```
+
+This is load-bearing, not tidiness. A `.code-workspace` file routinely lives *outside*
+the root it defines — that is the whole point of a folder of `.code-workspace` files —
+so rooting this write at the session root would be an OS-level access denial: the
+sandbox grants write access relative to the policy's `workspaceRoot`, and the file is
+not inside it. `test/host.test.mjs` pins exactly that (`D:/home/workspace` while the
+session root is `D:/home/api`), and the plugin store uses the same pattern, rooted at
+`storeDir()`.
+
+The command-created file has the same shape: `coreCreate` writes the new file rooted at
+the directory it creates it in, which is by construction the directory the caller was
+addressing.
+
 ## Discovery
 
-The active workspace file for a session directory `C`:
+The active workspace file for a session root `C` — resolution order, tombstones and
+adoption — is under "Associations, and why they are explicit" above. The operational
+consequences:
 
-1. a file already recorded in the plugin store whose *own* directory is `C` (the user
-   opened it explicitly) — authoritative;
-2. otherwise, while the discovery cache is cold, the **single** `*.code-workspace`
-   file in `C`, which is then recorded;
-3. two or more candidates is ambiguous and resolves to nothing. Silently picking one
-   would grant roots the user never chose.
-
-A directory with no workspace file makes the plugin **completely inert**: the prompt
-section renders the empty string, the interceptor falls through before doing any
-work, and every endpoint answers an empty state.
-
-The store (`<DSH_HOME>/storages/code-workspace/index.json`) is a single JSON file
-listing known workspace files, most recently opened first. It is written only from
-user-initiated flows and lives outside every agent sandbox root.
+- The **discovery cache** is keyed by `C`, holds only the adoption answer (a listing
+  is the one source `knownFileSync` cannot compute), and lives for
+  `DISCOVERY_TTL_MS` (3 s). The two association sources are read from the loaded store
+  and need no cache.
+- A directory with no workspace file makes the plugin **completely inert**: the prompt
+  section renders the empty string, the interceptor falls through before doing any
+  work, and every endpoint answers an empty state.
+- The store lives outside every agent sandbox root and is written only from
+  user-initiated flows.
 
 ## Caching, and why not `fs.stat`
 
@@ -106,7 +261,7 @@ A listener on the `tools/execute` around-dispatch waterfall handles `write`, `ed
 
 1. **Hydrate first, awaited.** A first call arriving before the file read resolves
    would otherwise see an empty cache, fall through to the default pipeline, and be
-   fenced against the *primary* root — surfacing as a spurious
+   fenced against the *session root* — surfacing as a spurious
    `[sandbox: file access denied under workspace-write mode]` for an ordinary write
    into another workspace folder.
 2. Resolve the standing policy (`sandboxPolicy.resolve({ session })`) and canonicalize
@@ -129,13 +284,13 @@ A listener on the `tools/execute` around-dispatch waterfall handles `write`, `ed
 
 **Why mode parity is free:** the mode field is never touched. The sandbox backends
 treat the per-call policy as fully specified and fence by `workspaceRoot` + `mode`, so
-`read-only` keeps denying in an additional root exactly as in the primary one.
+`read-only` keeps denying in an additional root exactly as in the session root.
 
 **Ownership rule.** Once a target has been resolved into an additional root the
 interception OWNS the call: a later failure is reported as that call's own error
 (including the `FS_*` code, and the one-shot escalation hint for a genuine
 `FS_SANDBOX_DENIED`) and never handed back to the default pipeline, which fences
-against the primary root and would replace a real cause — a missing `old_string`, a
+against the session root and would replace a real cause — a missing `old_string`, a
 locked file — with a spurious sandbox denial.
 
 **Lazy service resolution.** `shell`, `shellEnv`, `jobs`, `commands`, `typert`,
@@ -148,13 +303,32 @@ service appears.
 
 One global `systemPrompt.section` (`code-workspace:roots`, order 165 — after the tool
 guidance range 100–129) whose text provider evaluates per assembly and renders only
-for sessions that have a workspace file. It lists the file, the container directory and
-every folder with its primary/missing state, states the one-writable-root-per-command
-rule and the absolute-`workdir` requirement, and states that the workspace file is
-user-managed.
+for sessions that have a workspace file. Its lines:
+
+- `workspace file: <file> (in <fileDir>)`;
+- `working directory: <rootDir> — the file's FIRST existing folder, and this session's
+  sandbox root` (the wording was "primary working directory" while the root was the
+  file's directory);
+- every folder as `label — resolvedPath`, marked `(primary)` for the one equal to the
+  root and `(MISSING on disk)` when the probe said so;
+- when other files name the same root:
+  `Other .code-workspace files also name <root> — this session is on the one above; the
+  others are …`, with the instruction to ask the user to switch in the panel. A root
+  can be named by more than one file and DSH identifies a workspace by the root alone,
+  so the agent must not assume the folder set it sees is the only one that exists;
+- then the one-writable-root-per-command rule, the absolute-`workdir` requirement, and
+  that the workspace file is user-managed.
+
+The prompt is assembled from the cache, so `entryForSync` reads the same four-step
+resolution as the async path minus adoption (which needs a listing).
 
 For a file that failed to parse the section still renders, saying so — the Agent must
 know why no folders are available rather than silently getting none.
+
+The host state object the panel renders from carries exactly those facts:
+`rootDir`, `fileDir`, `file`, `title`, `roots[]` (each with `index`, `path`, `name`,
+`label`, `resolvedPath`, `exists`, `isPrimary`, `relative`), `extraRoots`, `conflict`
+(the files `conflictFor` found), plus `warnings`, `error` and `indent`.
 
 ## Notices
 
@@ -241,6 +415,11 @@ The left-column entry is the app-level surface, so its page is a **list**, not a
 every recorded `.code-workspace` file, most recently used first, with the rows that are
 already DSH workspaces marked and the ones whose file is gone marked as such.
 
+The row that is "active" is the **file**, not its directory. Two files can derive the same
+root — DSH then treats them as one workspace — so marking by root would light up every row
+and tell the user nothing; the store also carries no root for a recent record, only the file
+and its directory.
+
 Two sources are joined by path spelling because they answer different questions: the
 plugin's store ("a file I have used", probed per row by `recent`) and the workspace service
 ("a workspace this app already has"). A workspace the plugin has no file for is still listed,
@@ -272,6 +451,29 @@ usually sits somewhere else entirely. Home is the closest thing to "somewhere to
 from" that a host can name; when the host publishes none, the session directory is the
 fallback.
 
+### Where a choice is attributed, and how a duplicate is reported
+
+Panel operations made **inside a session** ride `/code-workspace` — the session-scoped
+command channel — so the host can attribute them to the session: `openFile`, `createFile`
+and every folder mutation go through `runCommand(sessionId, …)` while a session exists, and
+through the sessionless `codeWorkspace/*` channel only on the creation page, where there is
+no session to attribute anything to. That is what makes "two sessions rooted at one
+directory, each on a different workspace file" work end to end: a pick is never recorded
+merely for the directory.
+
+The remaining sessionless calls carry the session id **when there is one** — `openInEditor`
+and the `@` `listFiles` source both send `sessionId` (omitted, not `undefined`, when there
+is none) — because the host cannot guess which of several files naming a root the session
+is on.
+
+A root named by several files is then a fact the page must show rather than a silent tie.
+The host state carries `conflict` (`conflictFor`, every other known file naming this root)
+and the page renders an "other workspace files naming the same root" block: a title, one
+sentence of the reason (DSH keys a workspace by its root's canonical path, so these belong
+to the SAME DSH workspace), and one clickable row per file that issues
+`/code-workspace use "<file>"` for this session. The prompt carries the same fact for the
+agent.
+
 ### The host's own file dialog
 
 Browsing inside the app is the fallback, not the primary gesture: what a user actually wants
@@ -300,9 +502,12 @@ SSH is `unavailable` by construction: a dialog would open on a screen nobody is 
 The dialog itself has not been opened on a real desktop yet — the decisions above are pinned
 by tests with an injected runner, and the README says so rather than implying more.
 
-Picking a file then registers its container directory as the DSH workspace and, when
+Picking a file then registers its **derived root** as the DSH workspace and, when
 `uiWorkspace.openWorkspace` exists, switches the current session to it — which is how an
-already-open session lands on a real workspace without the user leaving the tab.
+already-open session lands on a real workspace without the user leaving the tab. A pick
+made inside a session rides `/code-workspace`, not this channel, so the host attributes
+it to the session: on the creation page there is no session to attribute it to, and the
+choice pins the root for whoever comes next.
 
 **The tab is the entry point, and the header button is the degraded one.** A tab is visible
 for the whole session, so a header button beside it is a second entry point for one page —
@@ -330,9 +535,26 @@ cannot serve it. The plugin opens its own namespace on the shared `/api` channel
 - a hand-written Typert contribution using `src-json` codecs and
   `invocation: { kind: 'direct' }`, registered through `ctx.inject(['typert'], …)`.
 
-Fifteen endpoints, keyed by **paths** rather than a session id: `state`, `recent`,
-`open`, `forget`, `useFile`, `create`, `addFolder`, `removeFolder`, `renameFolder`,
-`moveFolder`, `browse`, `makeDir`, `pick`, `reveal`, `listFiles`.
+Twenty endpoints, keyed by **paths** rather than a session id: `state`, `recent`,
+`forgetFile`, `open`, `forget`, `useFile`, `create`, `addFolder`, `removeFolder`,
+`renameFolder`, `moveFolder`, `browse`, `makeDir`, `pick`, `pickFile`, `reveal`,
+`editors`, `editorIcon`, `openInEditor`, `listFiles`.
+
+The channel is keyed by path because the session-creation page has no session yet, but
+eleven endpoints answer differently depending on *which* session asks, because a
+session's own pick outranks a root's record. `openInEditor` must open the file THIS
+session is on, `listFiles` must index THIS session's root set, and every endpoint that
+resolves a file for a root (`state`) or records a pick (`open`, `forget`, `useFile`,
+`create`, `addFolder`, `removeFolder`, `renameFolder`, `moveFolder`) has the same
+dependency. All of them therefore take an **optional `sessionId`**: declared with
+`acceptsUndefined: true`, which is how the shipped DSH descriptors mark a wire field a
+caller may leave out — without it a missing field is a protocol error rather than
+`undefined`, and the client omits it rather than sending `undefined` when there is no
+session. In-session callers reach the same core through `/code-workspace`, which carries
+the agent and is attributed automatically.
+
+Without the parameter the answer is the per-ROOT association, which is exactly what a
+brand-new session inherits: correct, never wrong, just not yet session-specific.
 
 `src-json` gives JSON-safety boundary checks, not schema validation, so the service
 treats every argument as hostile — type checks, a fully-qualified-path requirement,
@@ -350,9 +572,12 @@ spelling the sandbox layer itself produced.
 The requirement is narrower than "open a folder": the editor's window must be the
 same root set the session writes to, and the only way to get that from the VS Code
 family CLI is to hand it the **workspace file** — `Code.exe <file.code-workspace>`,
-`Trae CN.exe <file.code-workspace>`. So the target is the file, and the container
-directory is only the fallback for a session that has none (or whose recorded file
-is gone, which the panel already marks as missing).
+`Trae CN.exe <file.code-workspace>`. So the target is the file, and the session root is
+only the fallback for a session that has none (or whose recorded file is gone, which
+the panel already marks as missing). Because a root can be named by several files, the
+launch resolves the file **for the asking session** first: the sessionless endpoint
+takes `sessionId` for exactly that reason, or it would have to guess which of several
+files naming this root the session is on.
 
 ### Why the shipped control cannot do it, and why the takeover is -2
 
@@ -480,14 +705,16 @@ one `dsh-multi-folder` carries for its config file.
   and the Agent is told why; the user fixes it in their editor.
 - **Up to a 2 s stale window.** A folder added in VS Code mid-session is picked up
   within the model TTL. During that window a write into the new folder falls through
-  to the default pipeline and is refused by the primary-root fence.
+  to the default pipeline and is refused by the session-root fence. The same window
+  applies to the DERIVED ROOT: if the first existing folder changes on disk, the panel
+  and the command pick that up on their forced re-read rather than mid-TTL.
 - **Intercepted mutations do not participate in the `fs/write-intent` / `fs/edit-intent`
   guards** (the interception replaces the tool body), but a successful mutation does
   emit `fs/observed` with a presence observation, exactly like the shipped tools.
 - **`presentationMeta` is not computed** on the short-circuit path; tool cards fall
   back to their default presentation.
 - **`sandbox_permissions` escalation** on an intercepted call is passed to the default
-  pipeline, which re-roots at the primary workspace — escalation can never widen an
+  pipeline, which re-roots at the session root — escalation can never widen an
   additional root.
 - **A background shell job is registered whenever `ctx.jobs` exists**; the plugin
   cannot read the shipped tools' per-tool `enableRunInBackground: false` config.
@@ -502,7 +729,7 @@ one `dsh-multi-folder` carries for its config file.
   the feature. The view is also per session by construction: there is no cross-session
   page, and the creation page (no session yet) stays on the floating popover.
 - **`uiWorkspace.openWorkspace` is optional.** Without it the plugin still registers
-  the container directory and states so in the panel; the user picks the workspace in
+  the derived root and states so in the panel; the user picks the workspace in
   the picker.
 - **The pnpm lockfile policy can block installation** on a profile that enables
   `minimumReleaseAge` and carries a recently published dependency. Unrelated to this
@@ -527,9 +754,9 @@ one `dsh-multi-folder` carries for its config file.
 
 ## Tests
 
-`test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (22), `test/host.test.mjs`
-(43), `test/client.test.mjs` (44), `test/editor.test.mjs` (22) and
-`test/workspace-picker.test.mjs` (10) run with no DSH
+`test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (24), `test/host.test.mjs`
+(50), `test/client.test.mjs` (46), `test/editor.test.mjs` (22) and
+`test/workspace-picker.test.mjs` (10) — 177 cases — run with no DSH
 runtime. The host tests use a fake `fs` seam, `systemPrompt`, `commands` registry and
 `shell`/`jobs`; the editor tests inject the platform, environment, registry reader,
 `PATH` lookup and file probe, and hand `launchEditor` a child-process double, so a test
@@ -537,11 +764,21 @@ run never starts an editor. The client test uses a minimal React shim whose hook
 resolve once per call, which turns every component into a plain function whose element
 tree can be inspected and whose buttons can be clicked.
 
+The new behaviour is pinned where it can be exercised without a DSH runtime: the
+derived root and its fallbacks (`workspace-file.test.mjs`), the four-step resolution,
+the tombstone, the v1 store, the per-session pick, the duplicate report and the
+file-directory-rooted write (`host.test.mjs`), and the client's `sessionId`
+attribution, the duplicate block and the active-FILE marking (`client.test.mjs`).
+
 `tools/verify-instance.mjs` is the live counterpart: against a really booted throwaway
 profile it checks the index injection, that the served client bundle registers this
 package's factory with all three slot surfaces, the `@` source and the "Open In…"
 takeover, that the `codeWorkspace/*` endpoints answer — including the two editor
-refusals an unknown id must hit, neither of which launches anything — that `state`
+refusals an unknown id must hit, neither of which launches anything — that `open`
+registers the root its scratch workspace file derives (the file declares
+`{ "path": "." }`, so the derived root is the scratch directory itself), that `state`
 resolves a real `.code-workspace` sample with its three folders, and that a folders
 write-back through the real sandboxed `fs` seam preserves comments and untouched
-members.
+members. Its check is named for what it asserts —
+`open registers the root the file derives as a DSH workspace` — because the scratch
+file's `{ "path": "." }` is what makes that derived root equal the scratch directory.

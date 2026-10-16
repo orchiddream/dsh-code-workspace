@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   addFolder,
   createWorkspaceDocument,
+  deriveRoot,
   extraRootsFor,
   fileStamp,
   findFolderIndex,
@@ -103,7 +104,7 @@ test('storagePathFor prefers a portable relative spelling', () => {
 
 test('parses the real-world sample', () => {
   const model = parseWorkspaceFile(SAMPLE, FILE)
-  assert.equal(model.containerDir, 'D:\\kjsjs\\deepseek')
+  assert.equal(model.fileDir, 'D:\\kjsjs\\deepseek')
   assert.deepEqual(model.roots, [
     'D:/kjsjs/deepseek/dsh-nl',
     'D:/kjsjs/deepseek/deepseek-harness',
@@ -168,7 +169,7 @@ test('JSONC comments in a workspace file are accepted', () => {
   assert.deepEqual(model.roots, ['D:/kjsjs/deepseek/a'])
 })
 
-test('extraRootsFor excludes the container dir and orders longest first', () => {
+test('extraRootsFor excludes the session root and orders longest first', () => {
   const text = `{
 \t"folders": [
 \t\t{ "path": "." },
@@ -187,6 +188,44 @@ test('extraRootsFor excludes the container dir and orders longest first', () => 
     'D:/kjsjs/deepseek/deep/outer/inner',
     'D:/kjsjs/deepseek/deep/outer',
   ])
+})
+
+test('deriveRoot takes the first folder that exists, never the file folder', () => {
+  const model = parseWorkspaceFile(`{ "folders": [{ "path": "../api" }, { "path": "../shared" }] }`, 'D:/lib/api.code-workspace')
+  assert.deepEqual(model.roots, ['D:/api', 'D:/shared'])
+
+  // Unprobed folders are taken at face value — this is a pure function over the
+  // model, and the host probes every folder before calling it.
+  assert.equal(deriveRoot(model, 'D:/lib'), 'D:/api')
+
+  // A folder PROVEN missing (or proven to be a file) is skipped.
+  model.folders[0].exists = false
+  model.folders[0].isDirectory = false
+  assert.equal(deriveRoot(model, 'D:/lib'), 'D:/shared')
+})
+
+test('deriveRoot skips a missing or non-directory folder and falls back to the file folder', () => {
+  const model = parseWorkspaceFile(
+    `{ "folders": [{ "path": "../gone" }, { "path": "../a-file" }, { "path": "../here" }] }`,
+    'D:/lib/one.code-workspace',
+  )
+  model.folders[0].exists = false
+  model.folders[0].isDirectory = false
+  model.folders[1].exists = true
+  model.folders[1].isDirectory = false
+  model.folders[2].exists = true
+  model.folders[2].isDirectory = true
+  assert.equal(deriveRoot(model, 'D:/lib'), 'D:/here')
+
+  // Every folder unusable: the file's own directory is the only answer left.
+  for (const folder of model.folders) {
+    folder.exists = false
+    folder.isDirectory = false
+  }
+  assert.equal(deriveRoot(model, 'D:/lib'), 'D:/lib')
+
+  const empty = parseWorkspaceFile('{ "folders": [] }', 'D:/lib/empty.code-workspace')
+  assert.equal(deriveRoot(empty, 'D:/lib'), 'D:/lib')
 })
 
 test('addFolder is idempotent per resolved root', () => {

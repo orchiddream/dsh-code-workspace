@@ -123,14 +123,14 @@ record(
   badIcon.text.slice(0, 200),
 )
 
-const badOpen = await rpc('codeWorkspace/openInEditor', { containerDir: 'D:/kjsjs/deepseek', editorId: 'not-an-editor' }, 'verify-open-refused')
+const badOpen = await rpc('codeWorkspace/openInEditor', { rootDir: 'D:/kjsjs/deepseek', editorId: 'not-an-editor' }, 'verify-open-refused')
 record(
   'openInEditor refuses an unknown editor instead of launching anything',
   badOpen.ok === false && /no VS Code family editor|is not available/.test(badOpen.text),
   badOpen.text.slice(0, 200),
 )
 
-const state = await rpc('codeWorkspace/state', { containerDir: 'D:/kjsjs/deepseek' }, 'verify-state')
+const state = await rpc('codeWorkspace/state', { rootDir: 'D:/kjsjs/deepseek' }, 'verify-state')
 record('POST /api/codeWorkspace/state is routed', state.status === 200, 'status ' + state.status)
 record(
   'state resolves the real sample workspace file',
@@ -155,14 +155,14 @@ record(
   browse.text.slice(0, 200),
 )
 
-const files = await rpc('codeWorkspace/listFiles', { containerDir: 'D:/kjsjs/deepseek', query: '' }, 'verify-files')
+const files = await rpc('codeWorkspace/listFiles', { rootDir: 'D:/kjsjs/deepseek', query: '' }, 'verify-files')
 record(
   'listFiles yields the workspace roots as entry points',
   files.ok && files.value.candidates.length === 3,
   files.text.slice(0, 200),
 )
 
-const ranked = await rpc('codeWorkspace/listFiles', { containerDir: 'D:/kjsjs/deepseek', query: 'package' }, 'verify-ranked')
+const ranked = await rpc('codeWorkspace/listFiles', { rootDir: 'D:/kjsjs/deepseek', query: 'package' }, 'verify-ranked')
 record(
   'listFiles ranks a real fragment across the roots',
   ranked.ok && ranked.value.candidates.length > 0,
@@ -179,9 +179,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const scratchBase = await mkdtemp(join(tmpdir(), 'dsh-cws-live-'))
-const containerDir = join(scratchBase, 'ws').replace(/\\/g, '/')
-await mkdir(join(containerDir, 'a'), { recursive: true })
-await mkdir(join(containerDir, 'b'), { recursive: true })
+const rootDir = join(scratchBase, 'ws').replace(/\\/g, '/')
+await mkdir(join(rootDir, 'a'), { recursive: true })
+await mkdir(join(rootDir, 'b'), { recursive: true })
 
 try {
   const HANDWRITTEN = `{
@@ -192,19 +192,22 @@ try {
 \t"settings": { "editor.tabSize": 4 }
 }
 `
-  const file = join(containerDir, 'team.code-workspace').replace(/\\/g, '/')
+  const file = join(rootDir, 'team.code-workspace').replace(/\\/g, '/')
   await writeFile(file, HANDWRITTEN, 'utf8')
 
   const sameDir = (a, b) => String(a).replace(/\\/g, '/').toLowerCase() === String(b).replace(/\\/g, '/').toLowerCase()
   const opened = await rpc('codeWorkspace/open', { file }, 'verify-open')
   record(
-    'open registers the container directory as a DSH workspace',
-    opened.ok && opened.value.workspace && sameDir(opened.value.workspace.path, containerDir),
+    // This file declares `{ "path": "." }`, so the root it DERIVES is the
+    // directory the file lives in — that is what makes this a one-line check
+    // rather than one that has to move the scratch file somewhere else.
+    'open registers the root the file derives as a DSH workspace',
+    opened.ok && opened.value.workspace && sameDir(opened.value.workspace.path, rootDir),
     opened.ok ? JSON.stringify(opened.value.workspace) : opened.text.slice(0, 300),
   )
   record('open returns the folders the file declares', opened.ok && opened.value.roots.length === 1 && opened.value.roots[0].path === '.')
 
-  const added = await rpc('codeWorkspace/addFolder', { containerDir, path: join(containerDir, 'b').replace(/\\/g, '/'), name: 'Bee' }, 'verify-add')
+  const added = await rpc('codeWorkspace/addFolder', { rootDir, path: join(rootDir, 'b').replace(/\\/g, '/'), name: 'Bee' }, 'verify-add')
   record('addFolder rewrites the file through the sandboxed fs seam', added.ok && added.value.changed === true, added.ok ? JSON.stringify(added.value.state.roots.map((root) => root.path)) : added.text.slice(0, 300))
 
   const afterAdd = await readFile(file, 'utf8')
@@ -212,13 +215,13 @@ try {
   record('the write-back kept the untouched settings member', afterAdd.includes('"editor.tabSize": 4'))
   record('the write-back appended the new folder with a display name', /"name":\s*"Bee"/.test(afterAdd) && /"path":\s*"b"/.test(afterAdd))
 
-  const removed = await rpc('codeWorkspace/removeFolder', { containerDir, address: 'Bee' }, 'verify-remove')
+  const removed = await rpc('codeWorkspace/removeFolder', { rootDir, address: 'Bee' }, 'verify-remove')
   record('removeFolder addresses a folder by its display name', removed.ok && removed.value.changed === true, removed.ok ? JSON.stringify(removed.value.state.roots.map((root) => root.path)) : removed.text.slice(0, 300))
 
   const afterRemove = await readFile(file, 'utf8')
   record('the removal left the file parseable and comment-bearing', afterRemove.includes('// kept by hand') && JSON.parse(afterRemove.replace(/^\s*\/\/.*$/gm, '')).folders.length === 1)
 
-  const missing = await rpc('codeWorkspace/addFolder', { containerDir, path: join(containerDir, 'nope').replace(/\\/g, '/') }, 'verify-missing')
+  const missing = await rpc('codeWorkspace/addFolder', { rootDir, path: join(rootDir, 'nope').replace(/\\/g, '/') }, 'verify-missing')
   record('adding a missing directory is refused with a readable message', missing.ok === false && /does not exist/.test(missing.text), missing.text.slice(0, 200))
 } finally {
   // The scratch directory is about to disappear, but `open` recorded its file in

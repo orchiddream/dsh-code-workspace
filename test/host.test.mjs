@@ -20,6 +20,8 @@ import { normalizeSpelling, pathApiFor, toComparable } from '../lib/workspace-fi
 // overwrite the developer's real `~/.dsh/storages/code-workspace`.
 const TEST_HOME = await mkdtemp(join(tmpdir(), 'dsh-code-workspace-test-'))
 process.env.DSH_HOME = TEST_HOME
+/** Where the plugin's own store lands under the throwaway home. */
+const STORE_FILE = norm(join(TEST_HOME, 'storages', 'code-workspace', 'index.json'))
 test.after(async () => {
   await rm(TEST_HOME, { recursive: true, force: true })
 })
@@ -119,6 +121,7 @@ function boot({ files, standing = { mode: 'workspace-write', workspaceRoot: 'D:/
   const commands = new Map()
   const shellCalls = []
   const jobCalls = []
+  const workspaceCreates = []
   let provided = null
   let remoteContribution = null
 
@@ -159,6 +162,7 @@ function boot({ files, standing = { mode: 'workspace-write', workspaceRoot: 'D:/
     },
     workspaceRegistry: {
       async create(path, title) {
+        workspaceCreates.push({ path, title })
         return { id: 'ws-1', path, title }
       },
     },
@@ -209,6 +213,7 @@ function boot({ files, standing = { mode: 'workspace-write', workspaceRoot: 'D:/
     commands,
     shellCalls,
     jobCalls,
+    workspaceCreates,
     registry,
     emit,
     api: provided?.api,
@@ -267,6 +272,21 @@ test('apply registers the prompt section, the command, the service and the remot
   }
   const pick = b.remoteContribution.invocations.find((i) => i.method === 'pick')
   assert.deepEqual(pick.cancellation, { parameter: 'signal' })
+
+  // The sessionless channel is keyed by PATH, so a per-session answer needs the
+  // id as an OPTIONAL extra parameter — `acceptsUndefined` is how a shipped
+  // descriptor spells "the caller may leave this out"; without it a missing wire
+  // field is a protocol error rather than `undefined`.
+  const byMethod = (method) => b.remoteContribution.invocations.find((i) => i.method === method)
+  const paramOf = (method, name) => byMethod(method).parameters.find((p) => p.name === name)
+  for (const method of ['openInEditor', 'listFiles', 'state', 'useFile', 'addFolder']) {
+    const optional = paramOf(method, 'sessionId')
+    assert.ok(optional, method + ' must accept a session id')
+    assert.equal(optional.acceptsUndefined, true, method + '/sessionId must be optional')
+    assert.equal(optional.wire, 'sessionId')
+    assert.equal(optional.source, 'json')
+  }
+  assert.equal(paramOf('openInEditor', 'rootDir').acceptsUndefined, undefined)
 })
 
 test('a directory holding one .code-workspace file adopts it, and the prompt lists the folders', async () => {
@@ -274,7 +294,7 @@ test('a directory holding one .code-workspace file adopts it, and the prompt lis
   await b.emit('agent/created', { agent: agent() })
   const text = b.sections[0].text({ agent: agent() })
   assert.match(text, /workspace file: D:\/ws\/app\.code-workspace/)
-  assert.match(text, /primary working directory: D:\/ws/)
+  assert.match(text, /working directory: D:\/ws — the file's FIRST existing folder/)
   assert.match(text, /Other — D:\/other/)
   assert.match(text, /\(primary\)/)
   assert.match(text, /ONE root/)
@@ -507,6 +527,179 @@ test('open registers the container directory and records the file', async () => 
   assert.deepEqual(recent.files.map((f) => f.file), ['D:/proj/p.code-workspace'])
 })
 
+// ------------------------------------------------- the workspace-file folder
+
+/**
+ * The reported shape: ONE directory holding nothing but `.code-workspace`
+ * files, each naming projects elsewhere. Registering the directory holding the
+ * FILE is what made this unusable — the session landed in a folder with no
+ * code, and every file in it collapsed onto one DSH workspace.
+ */
+const LIBRARY_FILES = [
+  { path: 'D:/home', type: 'directory' },
+  { path: 'D:/home/workspace', type: 'directory' },
+  { path: 'D:/home/workspace/api.code-workspace', type: 'file', text: '{ "folders": [{ "path": "../api" }, { "path": "../shared" }] }' },
+  { path: 'D:/home/workspace/web.code-workspace', type: 'file', text: '{ "folders": [{ "path": "../web" }] }' },
+  { path: 'D:/home/api', type: 'directory' },
+  { path: 'D:/home/api/src', type: 'directory' },
+  { path: 'D:/home/shared', type: 'directory' },
+  { path: 'D:/home/web', type: 'directory' },
+]
+
+test('a file in a workspace-file folder roots the session at its FIRST folder, not at the file folder', async () => {
+  const b = boot({ files: LIBRARY_FILES, standing: { mode: 'workspace-write', workspaceRoot: 'D:/home/api' } })
+  const opened = await b.api.open('D:/home/workspace/api.code-workspace')
+
+  // The root is the first EXISTING folder of the file, and the file's own
+  // directory is reported separately so the panel can still show where it lives.
+  assert.equal(opened.rootDir, 'D:/home/api')
+  assert.equal(opened.fileDir, 'D:/home/workspace')
+  assert.deepEqual(opened.extraRoots, ['D:/home/shared'])
+  assert.deepEqual(opened.roots.map((r) => r.isPrimary), [true, false])
+  // DSH is asked for the DERIVED root: that is what makes the session land on
+  // real code and what keeps the two files in this folder apart.
+  assert.deepEqual(b.workspaceCreates, [{ path: 'D:/home/api', title: 'api' }])
+})
+
+test('the file folder itself is never adopted: several candidates there stay ambiguous', async () => {
+  const b = boot({ files: LIBRARY_FILES, standing: { mode: 'workspace-write', workspaceRoot: 'D:/home/workspace' } })
+  const atLibrary = { id: 's2', session: { id: 's2', header: { cwd: 'D:/home/workspace' } } }
+  await b.emit('agent/created', { agent: atLibrary })
+
+  // Two files in the addressed directory: no association, no prompt section and
+  // no interception. In particular NOT "whichever file was recorded first".
+  assert.equal(b.sections[0].text({ agent: atLibrary }), '')
+  const state = await b.api.state('D:/home/workspace')
+  assert.equal(state.file, null)
+  const [result] = await b.runTool({
+    name: 'write',
+    arguments: { file_path: 'D:/home/api/new.txt', content: 'x' },
+    agent: atLibrary,
+  })
+  assert.equal(result.fellThrough, true)
+})
+
+test('two sessions at one root can each hold a different workspace file', async () => {
+  // Two files whose first folder is the SAME directory: DSH identifies a
+  // workspace by that path, so they are one workspace and only an explicit,
+  // per-session choice can keep them apart.
+  const b = boot({
+    files: [
+      { path: 'D:/p', type: 'directory' },
+      { path: 'D:/lib', type: 'directory' },
+      { path: 'D:/lib/one.code-workspace', type: 'file', text: '{ "folders": [{ "path": "../p" }] }' },
+      { path: 'D:/lib/two.code-workspace', type: 'file', text: '{ "folders": [{ "path": "../p" }] }' },
+    ],
+    standing: { mode: 'workspace-write', workspaceRoot: 'D:/p' },
+  })
+  const alice = { id: 'alice', session: { id: 'alice', header: { cwd: 'D:/p' } } }
+  const bob = { id: 'bob', session: { id: 'bob', header: { cwd: 'D:/p' } } }
+  const command = b.commands.get('code-workspace')
+
+  await command.handler({ agent: alice, rawInput: 'use "D:/lib/one.code-workspace"' })
+  await command.handler({ agent: bob, rawInput: 'use "D:/lib/two.code-workspace"' })
+
+  // Each session keeps its own choice...
+  assert.equal((await b.api.state('D:/p', 'alice')).file, 'D:/lib/one.code-workspace')
+  assert.equal((await b.api.state('D:/p', 'bob')).file, 'D:/lib/two.code-workspace')
+  // ...and each is told that the root has another file, because switching
+  // "did not work" is exactly what a silent tie would look like.
+  const aliceState = await b.api.state('D:/p', 'alice')
+  assert.deepEqual(aliceState.conflict, ['D:/lib/two.code-workspace'])
+  // A brand-new session inherits the most recent explicit choice for the root.
+  const carol = { id: 'carol', session: { id: 'carol', header: { cwd: 'D:/p' } } }
+  assert.match(b.sections[0].text({ agent: carol }), /two\.code-workspace/)
+  assert.match(b.sections[0].text({ agent: carol }), /also name D:\/p/)
+})
+
+test('the store records the association per root AND per session, and unlink leaves a tombstone', async () => {
+  const b = boot({
+    files: [
+      { path: 'D:/p', type: 'directory' },
+      { path: 'D:/lib', type: 'directory' },
+      { path: 'D:/lib/one.code-workspace', type: 'file', text: '{ "folders": [{ "path": "../p" }] }' },
+      { path: 'D:/lib/two.code-workspace', type: 'file', text: '{ "folders": [{ "path": "../p" }] }' },
+    ],
+  })
+  const command = b.commands.get('code-workspace')
+  const alice = { id: 'alice', session: { id: 'alice', header: { cwd: 'D:/p' } } }
+  await command.handler({ agent: alice, rawInput: 'use "D:/lib/one.code-workspace"' })
+
+  const picked = JSON.parse(b.world.textAt(STORE_FILE))
+  assert.equal(picked.version, 2)
+  // Both records exist: the root's default (what a new session inherits) and
+  // this session's own choice (what keeps two sessions at one root apart).
+  assert.deepEqual(picked.roots, [{ root: 'D:/p', file: 'D:/lib/one.code-workspace' }])
+  assert.deepEqual(picked.sessions, [{ session: 'alice', file: 'D:/lib/one.code-workspace' }])
+
+  await command.handler({ agent: alice, rawInput: 'use ""' })
+  const cleared = JSON.parse(b.world.textAt(STORE_FILE))
+  assert.deepEqual(cleared.roots, [{ root: 'D:/p', file: null }])
+  assert.deepEqual(cleared.sessions, [])
+  // Adoption must NOT undo it: without the tombstone this root would re-adopt
+  // one of the two files and the button would look broken.
+  assert.equal((await b.api.state('D:/p', 'alice')).file, null)
+
+  // Picking again answers the tombstone.
+  await command.handler({ agent: alice, rawInput: 'use "D:/lib/two.code-workspace"' })
+  const repicked = JSON.parse(b.world.textAt(STORE_FILE))
+  assert.deepEqual(repicked.roots, [{ root: 'D:/p', file: 'D:/lib/two.code-workspace' }])
+})
+
+test('the prompt lists the root set of the file and names the other candidates', async () => {
+  const b = boot({ files: LIBRARY_FILES, standing: { mode: 'workspace-write', workspaceRoot: 'D:/home/api' } })
+  await b.api.open('D:/home/workspace/api.code-workspace')
+  const agentHere = { id: 'a', session: { id: 'a', header: { cwd: 'D:/home/api' } } }
+  await b.emit('agent/created', { agent: agentHere })
+  const text = b.sections[0].text({ agent: agentHere })
+  assert.match(text, /workspace file: D:\/home\/workspace\/api\.code-workspace \(in D:\/home\/workspace\)/)
+  assert.match(text, /working directory: D:\/home\/api/)
+  assert.match(text, /shared — D:\/home\/shared/)
+  assert.match(text, /ONE root/)
+})
+
+test('writing the workspace file is rooted at the FILE folder, which lies outside the session root', async () => {
+  const b = boot({ files: LIBRARY_FILES, standing: { mode: 'workspace-write', workspaceRoot: 'D:/home/api' } })
+  await b.api.open('D:/home/workspace/api.code-workspace')
+  await b.api.addFolder('D:/home/api', 'D:/home/web', 'Web')
+
+  const write = b.world.writes.find((w) => w.path === 'D:/home/workspace/api.code-workspace')
+  assert.ok(write, 'the workspace file must have been rewritten')
+  // Rooting this at the session root would be an OS-level denial: the file is
+  // NOT inside the root it defines.
+  assert.equal(write.policy.workspaceRoot, 'D:/home/workspace')
+})
+
+test('a v1 store keeps its records but no longer invents an association from a file\'s folder', async () => {
+  // v1 listed files and resolved "the file whose DIRECTORY is the session
+  // directory" — with several files in one folder that returned whichever was
+  // recorded first. That is the failure this guards.
+  const b = boot({
+    files: [
+      ...LIBRARY_FILES,
+      {
+        path: STORE_FILE,
+        type: 'file',
+        text: JSON.stringify({ version: 1, files: ['D:/home/workspace/web.code-workspace', 'D:/home/workspace/api.code-workspace'] }),
+      },
+    ],
+    standing: { mode: 'workspace-write', workspaceRoot: 'D:/home/workspace' },
+  })
+  const recent = await b.api.recent()
+  assert.deepEqual(recent.files.map((f) => f.file), [
+    'D:/home/workspace/web.code-workspace',
+    'D:/home/workspace/api.code-workspace',
+  ])
+  const atLibrary = { id: 's3', session: { id: 's3', header: { cwd: 'D:/home/workspace' } } }
+  assert.equal(b.sections[0].text({ agent: atLibrary }), '')
+
+  // An explicit open writes the association the v1 store could not express.
+  await b.api.open('D:/home/workspace/api.code-workspace')
+  const store = JSON.parse(b.world.textAt(STORE_FILE))
+  assert.equal(store.version, 2)
+  assert.deepEqual(store.roots, [{ root: 'D:/home/api', file: 'D:/home/workspace/api.code-workspace' }])
+})
+
 test('open rejects a directory, a missing file and a non-workspace name', async () => {
   const b = boot({ files: BASE_FILES })
   await assert.rejects(() => b.api.open('D:/ws'), /not a .code-workspace file/)
@@ -668,7 +861,7 @@ test('a user edit of the workspace file is picked up after the model TTL', async
   assert.deepEqual(state.roots.map((r) => r.resolvedPath), ['D:/ws', 'D:/other/src'])
 })
 
-test('useFile re-points a directory at another workspace file, and forget clears it', async () => {
+test('useFile re-points to the file\'s own ROOT, and forget tombstones the addressed root', async () => {
   const b = boot({
     files: [
       { path: 'D:/ws', type: 'directory' },
@@ -679,9 +872,15 @@ test('useFile re-points a directory at another workspace file, and forget clears
   })
   const opened = await b.api.useFile('D:/ws', 'D:/ws/b.code-workspace')
   assert.equal(opened.file, 'D:/ws/b.code-workspace')
-  assert.deepEqual(opened.extraRoots, ['D:/other'])
+  // b names only D:/other, so THAT is the root a session must land on — and
+  // there is no additional root, because the one folder IS the root.
+  assert.equal(opened.rootDir, 'D:/other')
+  assert.equal(opened.fileDir, 'D:/ws')
+  assert.deepEqual(opened.extraRoots, [])
+  assert.deepEqual(opened.roots.map((r) => r.isPrimary), [true])
   const forgotten = await b.api.forget('D:/ws')
   assert.equal(forgotten.file, null)
+  assert.equal(forgotten.rootDir, 'D:/ws')
 })
 
 test('`/code-workspace use` with no argument clears the association on the command channel too', async () => {

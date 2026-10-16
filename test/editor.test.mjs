@@ -351,15 +351,15 @@ test('chooseEditor honours an explicit choice and otherwise follows the family o
 
 test('the launch target is the workspace file, and the directory only as the fallback', () => {
   assert.deepEqual(
-    editorTarget({ containerDir: 'D:/ws', file: 'D:/ws/app.code-workspace', fileExists: true }),
+    editorTarget({ rootDir: 'D:/ws', file: 'D:/ws/app.code-workspace', fileExists: true }),
     { target: 'D:/ws/app.code-workspace', kind: 'workspace' },
   )
   // A recorded file that is gone degrades to the directory instead of failing.
   assert.deepEqual(
-    editorTarget({ containerDir: 'D:/ws', file: 'D:/ws/app.code-workspace', fileExists: false }),
+    editorTarget({ rootDir: 'D:/ws', file: 'D:/ws/app.code-workspace', fileExists: false }),
     { target: 'D:/ws', kind: 'directory' },
   )
-  assert.deepEqual(editorTarget({ containerDir: 'D:/ws', file: null }), { target: 'D:/ws', kind: 'directory' })
+  assert.deepEqual(editorTarget({ rootDir: 'D:/ws', file: null }), { target: 'D:/ws', kind: 'directory' })
 })
 
 // --------------------------------------------------------------- launch
