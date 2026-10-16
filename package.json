@@ -29,13 +29,18 @@
     "cordis.patch.yml",
     "docs"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orchiddream/dsh-code-workspace.git"
+  },
+  "homepage": "https://github.com/orchiddream/dsh-code-workspace#readme",
+  "bugs": {
+    "url": "https://github.com/orchiddream/dsh-code-workspace/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
-    "compatibility": {
-      "node": ">=20",
-      "dshReleases": {
-        "0.2.0-rc.2": "compatible"
-      }
-    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -51,10 +56,12 @@
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.2"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh": ">=0.2.0-rc.2"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\""
