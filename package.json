@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-workspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness plugin: VS Code-compatible multi-root workspaces. A .code-workspace file is the single source of truth — its `folders` become writable roots of the session, exactly as in VS Code / Trae / Cursor.",
   "keywords": [
     "dsh-plugin",
