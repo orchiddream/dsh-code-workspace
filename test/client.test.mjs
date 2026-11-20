@@ -851,6 +851,35 @@ test('the sidebar page is a manager: it lists every workspace it knows, and mark
   assert.match(text, /不存在/)
 })
 
+test('the registered marks follow the workspace list when it changes', async () => {
+  // The registered set used to be cached for the plugin's whole life, so a
+  // workspace registered or removed after the first render kept its stale mark.
+  // Rebuilding it per snapshot is what this pins: the SAME panel re-render must
+  // forget a workspace that is gone.
+  let snapshot = { items: [{ id: 'w1', path: 'D:/ws', sessionIds: ['session-1'] }] }
+  const { panel } = await boot({
+    services: {
+      workspaces: {
+        list: {
+          getSnapshot: () => snapshot,
+          subscribe: () => () => {},
+        },
+      },
+    },
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(null)
+    },
+  })
+  expand(panel.component({}))
+  await flush()
+  assert.match(textOf(expand(panel.component({}))), /已注册/, 'the registered workspace is marked')
+
+  snapshot = { items: [] }
+  assert.doesNotMatch(textOf(expand(panel.component({}))), /已注册/, 'a removed workspace must lose its mark')
+})
+
 test('choosing a listed workspace opens it, which is how a session moves between workspaces', async () => {
   const opened = []
   const { panel } = await boot({
