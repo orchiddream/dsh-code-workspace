@@ -4,3 +4,5 @@ node_modules/
 .verify/
 .scratch/
 *.log
+# throwaway investigation harnesses, screenshots and fixtures
+.tmp/

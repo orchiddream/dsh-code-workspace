@@ -676,16 +676,25 @@ Everything else is client-only:
   `terminal` kind unregistered, and the shortcut never renders — the rest of the
   panel keeps working. Nothing is added to `dsh.client.inject`: that prerequisite
   list is hard, and a trimmed composition must lose the feature, not the plugin.
-- `openTab` returns no tab id, and the `terminal` kind is `multiple: true`, so the
-  new tab is claimed from the `openTabs` inventory delta. Its view is then
-  borrowed by `(sessionId, tabId)` and awaited until writable — `TerminalView.write`
-  drops input before that point (the tab body creates and attaches the view).
+- `openTab` returns no tab id and the `terminal` kind is `multiple: true`, so each
+  open mints a fresh `contentId` (`sidebar://terminal/<uuid>`). The claim reads
+  **this session's own** tabs first (`sidebarRight.tabsIn(sessionId)`) and keys the
+  delta by `contentId`; the flat `openTabs` inventory is only the fallback. It must
+  not key by `tabId`: the inventory is flattened across every session while ids are
+  minted per session, so a foreign session's `tab2` would filter out the tab this
+  click just opened (that is the "the terminal tab did not appear" bug, reproduced
+  and fixed on `0.2.2-rc.5` — see `design-project-shells.md §11`). The claim is
+  synchronous, because the store commit already happened when `openTab` returns.
+  A tab carrying `navigation.params.terminalId` belongs to an Agent and is never
+  claimed, and no other session's tab is ever closed.
+- Its view is borrowed by `(sessionId, tabId)` and awaited until writable —
+  `TerminalView.write` drops input before that point (the tab body creates and
+  attaches the view).
 - The project → `contentId` binding is persisted in browser `localStorage`
   (`dsh.code-workspace.project-shells.v1`, capped at 64 entries): content ids
   survive a page reload while layout tab ids do not, so a click after reload
   focuses the restored tab instead of duplicating it. The binding is scoped by
-  session, and a tab that lands in another session is closed rather than typed
-  into. A tab whose process has exited is focused as it is — the screen shows the
+  session. A tab whose process has exited is focused as it is — the screen shows the
   exit code, and closing it then clicking again allocates a new shell.
 - An additional root gets the shell's own `cd` spelling — `Set-Location
   -LiteralPath` for PowerShell, `cd /d` for cmd, POSIX `cd` otherwise (a Windows

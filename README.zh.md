@@ -40,7 +40,11 @@ DSH 的工作区是**单根目录**，`workspaceRegistry.create()` 也只接受�
 ## 环境要求
 
 - Node.js >= 20
-- DeepSeek Harness `0.2.0-rc.2`（本机实测版本）
+- DeepSeek Harness **`0.2.2-rc.5`**（桌面应用实测版本）或 `0.2.0-rc.2`（本插件最初的目标版本）
+
+两代之间有一处**不向后兼容的插槽行为变化**：注册进既有槽位时，插件自己塞进 `inject` 返回值的 `hooks` 包
+不再原样送达组件（`props.hooks` 变成槽位自己的钩子容器）。本插件对「拿不到就用自己那份」处理，
+所以两代组合都能正常渲染——见「在编辑器中打开」。
 
 ## 安装
 
@@ -210,6 +214,8 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 
 **接管官方「Open In…」控件。** 官方目录是编译期写死的表，浏览器半边还有自己的 id→文案映射，所以部署无法通过配置往那个菜单加编辑器。因此本插件在两个目录作用域的格子上登记**同一个 slot id**（`open-in-app`）——`conversation.session.header.utilities` 与 `sidebar.right.tab.files.actions`——priority 用 **-2**。槽位账本对同 id 只渲染 priority 最低的那条，所以本插件胜出，而官方注册仍活在底下（停用本插件，官方控件原样回来），`dsh-plugin-open-in-trae` 的 -1 也依然合法。其余应用的名字、图标、路由与行为全部保持官方实现；只有家族成员被改派到本插件的启动器，而 `VSCodium`、`Trae` / `Trae CN` 是官方目录里根本没有的条目。若 shell 没有提供绘制菜单所需的 UI primitives，接管整体跳过，官方控件保持不动。
 
+`0.2.2-rc.5` 收紧了插槽的行为：注册方自己塞进 `inject` 返回值的 `hooks` 包不再原样交给组件（`props.hooks` 是槽位自己的钩子容器）。旧写法会在这里抛 `Cannot read properties of undefined (reading 'openInAppFamily')`，而接管控件又把官方控件挡着，等于用户丢了那个菜单。现在接管用的控制器是插件级单例，组件先读 `props.hooks.*`、读不到就用单例，`useMenuStore` 对缺失的 store 返回兜底值——两种组合都能画出来，槽位错误也不会再连累官方控件。
+
 记住的选择存在浏览器本地键 `dsh.code-workspace.editor`；官方插件拥有的快捷键（`Ctrl+Alt+O`）刻意不动。
 
 ### 每个项目打开 DSH 终端
@@ -226,6 +232,20 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 - **组合被裁剪时**：没有右侧栏或没有终端插件的组合，整个功能不出现，面板其余部分照常工作。
 
 这条快捷按钮**不经过宿主插件**：终端是浏览器 ↔ 宿主的既有通道，没有新增端点、没有 store 改动，也不向提示词或工具增加任何内容。⚠️ 内置终端以**系统用户权限**运行，不受 Agent 沙箱约束——见下面「权限模型」。
+
+#### 终端标签的「身份」：contentId，不是 tabId
+
+这是 `0.2.2-rc.5` 上真实踩过并修掉的坑，值得知道：
+
+- 宿主把**所有会话**的终端标签摊平成一份清单（`sidebarRight.openTabs`，启动时连 localStorage 里每个已保存会话的布局都算），
+  而标签 id（`tab1`、`tab2`…）是**每个会话各自**的计数器。两个会话里同时存在 `tab2` 是常态。
+- 所以「用 tabId 判断这次点击新开的是哪一个」在真实 profile 里几乎必然误判：别的会话早就有 `tab2`，
+  新开的终端也叫 `tab2`，插件以为它「已经开着」，3 秒后报 `终端打开失败: the terminal tab did not appear`——
+  但终端其实已经出现在右侧栏里，而且没有 `cd`、没有改名、也没有被记住（再点会再开一只）。
+- 现在的做法：优先用 `sidebarRight.tabsIn(sessionId)` 读**本会话自己**的标签，增量按 **contentId**
+  （每次打开唯一，`sidebar://terminal/<uuid>`）比较；认领提交是同步的，所以调用栈内就完成，订阅只是兜底。
+  记住的也是 contentId，刷新页面/切会话后仍能聚焦同一只终端。
+- Agent 自己开的终端（`navigation.params.terminalId`）不会被认领——往它里面写 `cd` 会驱动 Agent 的进程。
 
 ### `@` 文件菜单
 
@@ -299,13 +319,13 @@ DSH 里一个 Workspace 的身份就是它根目录 `realpath` 规范化后的�
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-六个测试文件，共 190 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入）、假的右侧栏与终端服务（标签清单、`openTab`、`view` 全部注入）、可注入的对话框 runner（所以没有任何测试会真的弹出文件选择框），客户端用最小 React shim（hook 单次求值、递归展开函数组件），所以可以直接检查渲染树并模拟点击。
+六个测试文件，共 200 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入）、假的右侧栏与终端服务（标签清单、`openTab`、`view` 全部注入）、可注入的对话框 runner（所以没有任何测试会真的弹出文件选择框），客户端用最小 React shim（hook 单次求值、递归展开函数组件），所以可以直接检查渲染树并模拟点击。
 
 ```bash
 node test/jsonc.test.mjs              # 25 —— JSONC 解析与注释保留改写
 node test/workspace-file.test.mjs     # 24 —— VS Code 路径规则、folders 增删改、推导会话根
 node test/host.test.mjs               # 50 —— 发现、store、拦截重根、拒绝、命令、远程 API、@ 发现、编辑器守卫
-node test/client.test.mjs             # 59 —— bundle 契约、槽位注册、面板交互、重复根区块、Open In… 接管、@ 源、项目终端快捷按钮
+node test/client.test.mjs             # 67 —— bundle 契约、槽位注册、面板交互与重构后的页面/组件、重复根区块、Open In… 接管、@ 源、项目终端快捷按钮与标签认领
 node test/editor.test.mjs             # 22 —— 家族解析、先证明再启动、子进程环境、启动结果、图标
 node test/workspace-picker.test.mjs   # 10 —— 主机文件对话框的三种结果与可注入 runner
 ```
@@ -324,11 +344,24 @@ dsh --profile cwsverify --port 0 --no-open
 node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
-本机 `0.2.0-rc.2` 实测 **30/30**：编辑器功能加入前的 25 项，加上随它新增的 5 项（bundle 里带上了接管、`codeWorkspace/editors` 答出家族、未知 id 必须撞上的两条拒绝）。脚本不会启动任何编辑器——它发的两次编辑器调用按构造都是拒绝。它的临时工作区文件里写的是 `{ "path": "." }`，所以插件从它推导出的根就是那个临时目录本身，`open registers the root the file derives as a DSH workspace` 这一条断言的就是这个根，而不是文件所在的目录。
+本机 `0.2.0-rc.2` 实测 **30/30**；桌面应用自带的 `0.2.2-rc.5` 上实测 **31/31**（用该应用 `app.asar` 里的 `dsh` 启动一个一次性 profile）：编辑器功能加入前的 25 项，加上随它新增的 5 项（bundle 里带上了接管、`codeWorkspace/editors` 答出家族、未知 id 必须撞上的两条拒绝），再加上项目终端的 bundle 标记检查。脚本不会启动任何编辑器——它发的两次编辑器调用按构造都是拒绝。它的临时工作区文件里写的是 `{ "path": "." }`，所以插件从它推导出的根就是那个临时目录本身，`open registers the root the file derives as a DSH workspace` 这一条断言的就是这个根，而不是文件所在的目录。
 
-项目终端功能给脚本**新增了一条 bundle 标记检查**（共 31 项）：它要求实例服务的是带项目终端代码的**新** bundle。本仓库的 desktop profile 里装的仍是旧的 npm 包，所以这一条**尚未在桌面实例上实测**；客户端行为由 `test/client.test.mjs` 的假右侧栏/终端服务覆盖。
+项目终端那一条要求实例服务的是带项目终端代码的**新** bundle；宿主端点与 bundle 由上面的脚本覆盖，浏览器里的点击行为则由一次真实的 rc.5 端到端回放钉住（见下）。
 
-这个脚本**不覆盖浏览器里画出来的面板**：它断言的是宿主端点和 bundle 标记，不是渲染出来的界面。对话视图的页面注册、入口切换、无布局服务时不动作与会话归属由 `test/client.test.mjs` 钉住；这一页在真实中央栏里画出来的样子**尚未在浏览器中实测**。左栏那一行与主机文件对话框同理：注册、决策与降级都由测试钉住，但**对话框本身还没有在真实桌面上弹过一次**。
+这个脚本**不覆盖浏览器里画出来的面板**：它断言的是宿主端点和 bundle 标记，不是渲染出来的界面。对话视图的页面注册、入口切换、无布局服务时不动作与会话归属由 `test/client.test.mjs` 钉住。真实浏览器里的这一页用 Playwright 驱动的 rc.5 实例回放过（新会话 → 打开「代码工作区」页签 → 点项目行的 `>_`）：终端标签被打开并认领、附加根写入 `cd`、`localStorage` 映射落盘、面板文案为成功提示——这也是上面 11.1 那个 bug 的复现与验证环境。左栏那一行与主机文件对话框的注册、决策与降级同样由测试钉住，但**对话框本身还没有在真实桌面上弹过一次**。
+
+### 读桌面应用里真实的客户端代码
+
+桌面应用把真实的 DSH 运行时**打包**在 `resources/app.asar` 里，而且**版本未必等于 npm 上装的 CLI**（本机：应用 `0.2.2-rc.5`，全局 CLI `0.2.0-rc.2`）。契约结论必须来自应用自己那份代码，所以 `tools/asar-peek.mjs` 不依赖任何解包工具直接读它：
+
+```bash
+ASAR="D:/AI/DeepSeek Harness/resources/app.asar"
+node tools/asar-peek.mjs find "$ASAR" "client-ui-sidebar-right/(src|lib)/"      # 列出内部路径
+node tools/asar-peek.mjs dump "$ASAR" "dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right" ./ref/sidebar-right
+node tools/asar-peek.mjs get  "$ASAR" "dsh/package.json"                        # 直接看版本
+```
+
+它会跟随 pnpm 风格的 `link` 条目；`app.asar.unpacked` 里的文件只报告、不抽取。本文与 `docs/design-project-shells.md §11` 的 rc.5 结论、`docs/design-panel-ui.md` 的 token 表都来自它的输出。
 
 ---
 
@@ -348,9 +381,11 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 | `tools/profile-link.mjs` | 不经过 pnpm 把插件挂载进 / 卸载出 DSH profile；`--package` 可退掉被取代的插件 |
 | `tools/verify-instance.mjs` | 真实实例端到端校验 |
 | `tools/probe-index.mjs` | 导出一个实例的索引，检查 bundle 注入 |
+| `tools/asar-peek.mjs` | 无依赖地读 / 列 / 抽桌面应用打包的 `resources/app.asar`——rc.5 的客户端契约就是这么读出来的 |
 | `docs/client-contract.md` | DSH 0.2.0-rc.2 客户端插件契约（逐条带行号出处） |
 | `docs/design.md` | 架构与不变量 |
-| `docs/design-project-shells.md` | 项目终端功能的设计与取舍记录（已实现，稳定结论已折叠进 `docs/design.md`） |
+| `docs/design-project-shells.md` | 项目终端功能的设计、取舍与 rc.5 实测修正 |
+| `docs/design-panel-ui.md` | 「代码工作区」页面的 UI 重构规格（结构、组件、文案、令牌、验收） |
 
 ## 许可证
 

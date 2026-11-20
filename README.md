@@ -40,7 +40,9 @@ Why the file's own directory is not the root: DSH identifies a workspace by its 
 ## Requirements
 
 - Node.js >= 20
-- DeepSeek Harness `0.2.0-rc.2` (the version this was verified against)
+- DeepSeek Harness **`0.2.2-rc.5`** (measured against the desktop app) or `0.2.0-rc.2` (the version this plugin originally targeted)
+
+One incompatible slot-behaviour change separates the two: a registering plugin's own `hooks` bag inside the `inject` return value is no longer delivered to the component as-is (`props.hooks` became the slot's own hook container). This plugin falls back to its own instance when the channel is absent, so both compositions render — see "The 'Open In…' takeover".
 
 ## Install
 
@@ -220,6 +222,8 @@ The family, in the order the panel offers it and the automatic choice follows it
 
 The remembered editor is stored per browser under `dsh.code-workspace.editor`; the keyboard shortcut the shipped plugin owns (`Ctrl+Alt+O`) is deliberately untouched.
 
+On `0.2.2-rc.5` that takeover used to throw `Cannot read properties of undefined (reading 'openInAppFamily')` and crash its slot entry: the plugin's own `hooks` bag no longer reaches the component, and a takeover that replaces the shipped control while failing to render leaves the user with no "Open In…" control at all. The takeover's controller is now a plugin-level singleton; the control prefers `props.hooks.*` and falls back to that instance, and `useMenuStore(store, fallback)` answers with a default instead of throwing on a missing store. Both slot behaviours render, and a slot failure can no longer take the shipped control down with it.
+
 ### A terminal per folder
 
 The leftmost button on each folder row is `>_` (first in the `↑ ↓ ✎ ⧉ ✕` group). It opens DSH's **own** interactive terminal in the right Sidebar — not an external terminal window. The PTY, screen recovery, quota and process cleanup belong to the upstream terminal service; this plugin only supplies the entry point and the directory.
@@ -234,6 +238,15 @@ The leftmost button on each folder row is `>_` (first in the `↑ ↓ ✎ ⧉ �
 - **Trimmed compositions**: without the right Sidebar or the terminal plugin the whole feature disappears and the rest of the panel keeps working.
 
 The shortcut never goes through the host plugin: the terminal is the existing browser ↔ host channel, so there is no new endpoint, no store change, and nothing added to the prompt or the tools. ⚠️ The built-in terminal runs with **system-user permissions**, independent of the Agent sandbox — see the permission model below.
+
+#### Terminal-tab identity: `contentId`, never `tabId`
+
+This was a real bug on `0.2.2-rc.5`, and it explains the old red line `终端打开失败: the terminal tab did not appear`:
+
+- The host flattens **every** session's terminal tabs into one inventory (`sidebarRight.openTabs`, which at startup also reads the saved layout of every session in localStorage), while tab ids (`tab1`, `tab2`, …) are minted by a **per-session** counter. Two sessions holding `tab2` at once is normal.
+- Any delta keyed by bare `tabId` therefore misreads reality in a real profile: another session already has `tab2`, the terminal this click opened is also `tab2`, the plugin treats it as already open, and 3 s later reports "the terminal tab did not appear" — while the terminal is on screen, has no `cd`, got no title, was never remembered (and clicking again opens yet another one).
+- The plugin now reads **this session's own** tabs first (`sidebarRight.tabsIn(sessionId)`), keys the delta by **`contentId`** (unique per open, `sidebar://terminal/<uuid>`), and claims synchronously — the store commit already happened when `openTab` returns, so the subscription is only a fallback. The remembered identity is the content id, so a reload or a session switch still focuses the same terminal.
+- Terminals an Agent opened for itself (`navigation.params.terminalId`) are never claimed — writing a `cd` into one would drive the Agent's process.
 
 ### The `@` menu
 
@@ -306,13 +319,13 @@ A Workspace's identity in DSH is its root directory's `realpath`-canonicalised p
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-Six files, 190 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), fakes for the right Sidebar and terminal services (the tab inventory, `openTab` and `view` all injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
+Six files, 200 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), fakes for the right Sidebar and terminal services (the tab inventory, `openTab` and `view` all injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
 
 ```bash
 node test/jsonc.test.mjs              # 25 — JSONC parsing and comment-preserving rewrites
 node test/workspace-file.test.mjs     # 24 — VS Code path rules, folders CRUD, the derived root
 node test/host.test.mjs               # 50 — discovery, the store, re-rooting, refusals, command, remote API, @ discovery, editor guards
-node test/client.test.mjs             # 59 — bundle contract, slot registrations, panel interaction, the duplicate-root block, Open In… takeover, @ source, project-terminal shortcut
+node test/client.test.mjs             # 67 — bundle contract, slot registrations, panel interaction and the redesigned page/components, the duplicate-root block, the Open In… takeover, the @ source, the project-terminal shortcut and its tab claim
 node test/editor.test.mjs             # 22 — family resolution, proof-before-launch, child environment, launch outcomes, icons
 node test/workspace-picker.test.mjs   # 10 — the host file dialog's three outcomes, its injected runner
 ```
@@ -331,11 +344,24 @@ dsh --profile cwsverify --port 0 --no-open
 node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
-Measured on `0.2.0-rc.2`: **30/30** — the 25 checks it made before the editor feature, plus the five added with it (the served bundle carries the takeover, `codeWorkspace/editors` answers the family, and the two refusals an unknown id must hit). It never launches an editor: both editor calls it makes are refusals by construction. Its scratch workspace file declares `{ "path": "." }`, so the root the plugin derives from it is that scratch directory itself, and the check named `open registers the root the file derives as a DSH workspace` asserts that derived root rather than the directory holding the file.
+Measured on `0.2.0-rc.2`: **30/30**; on the desktop app's own `0.2.2-rc.5` (booting the `dsh` inside its `app.asar` with a throwaway profile): **31/31** — the 25 checks it made before the editor feature, plus the five added with it (the served bundle carries the takeover, `codeWorkspace/editors` answers the family, and the two refusals an unknown id must hit), plus the project-terminal bundle marker. It never launches an editor: both editor calls it makes are refusals by construction. Its scratch workspace file declares `{ "path": "." }`, so the root the plugin derives from it is that scratch directory itself, and the check named `open registers the root the file derives as a DSH workspace` asserts that derived root rather than the directory holding the file.
 
-The project-terminal feature adds **one bundle-marker check** to that script (31 checks now): it requires the instance to serve a bundle that carries the project-terminal code. This repository's desktop profile still installs the old npm package, so that check has **not been measured on the desktop instance yet**; the client behaviour is pinned by `test/client.test.mjs` against fake right-Sidebar/terminal services.
+The project-terminal marker check requires the instance to serve a bundle that carries the project-terminal code; host endpoints and bundle markers are covered by that script, and the browser-side click behaviour is pinned by a real rc.5 end-to-end replay (below).
 
-The Conversation view page is **not covered by that script** (it asserts host endpoints and bundle markers, not rendered UI): its registration, its entry point, its toggle, its degraded no-op and its per-session scoping are pinned by `test/client.test.mjs`. Rendering it inside a real Conversation tab strip has not been observed in a live browser yet. The same holds for the left-column row and the host file dialog: their registrations, their decisions and their fallbacks are pinned by tests, but the dialog itself has not been opened on a real desktop yet.
+The Conversation view page is **not covered by that script** (it asserts host endpoints and bundle markers, not rendered UI): its registration, its entry point, its toggle, its degraded no-op and its per-session scoping are pinned by `test/client.test.mjs`. A real browser played that page back on a Playwright-driven rc.5 instance (create a session → open the Code Workspace tab → click a folder row's `>_`): the terminal tab opened and was claimed, the additional root got its `cd`, the `localStorage` mapping was written, and the panel reported success — that harness is also how the identity bug above was reproduced and verified. The left-column row and the host file dialog are still pinned by tests only: their registrations, decisions and fallbacks are covered, but the dialog itself has not been opened on a real desktop yet.
+
+### Reading the shipped client of the desktop app
+
+The desktop app packs its own DSH runtime **inside** `resources/app.asar`, and that runtime is not necessarily the version npm installed (here: the app carries `0.2.2-rc.5`, the global CLI `0.2.0-rc.2`). Contract claims must come from the app's own copy, so `tools/asar-peek.mjs` reads the archive with no extraction tool:
+
+```bash
+ASAR="D:/AI/DeepSeek Harness/resources/app.asar"
+node tools/asar-peek.mjs find "$ASAR" "client-ui-sidebar-right/(src|lib)/"
+node tools/asar-peek.mjs dump "$ASAR" "dsh/node_modules/@deepseek-ai/dsh-client-ui-sidebar-right" ./ref/sidebar-right
+node tools/asar-peek.mjs get  "$ASAR" "dsh/package.json"
+```
+
+It follows pnpm-style `link` entries; `app.asar.unpacked` files are reported but not extracted. The rc.5 facts in this file, in `docs/design-project-shells.md §11`, and the token table in `docs/design-panel-ui.md` all come from its output.
 
 ---
 
@@ -355,9 +381,11 @@ The Conversation view page is **not covered by that script** (it asserts host en
 | `tools/profile-link.mjs` | Link / unlink the plugin into a DSH profile without pnpm; `--package` retires a superseded one |
 | `tools/verify-instance.mjs` | End-to-end checks against a live instance |
 | `tools/probe-index.mjs` | Dump one instance's index and report bundle injection |
+| `tools/asar-peek.mjs` | Read/list/extract files out of the desktop app's packed `resources/app.asar` (no dependencies) — how the rc.5 client contract was read |
 | `docs/client-contract.md` | The DSH 0.2.0-rc.2 client-plugin contract, citation-anchored |
 | `docs/design.md` | Architecture and invariants |
-| `docs/design-project-shells.md` | The project-terminal feature's design and trade-offs (implemented; stable conclusions folded into `docs/design.md`) |
+| `docs/design-project-shells.md` | The project-terminal feature's design, trade-offs, and the rc.5 corrections |
+| `docs/design-panel-ui.md` | The Code Workspace page's UI redesign spec (layout, components, copy, tokens, acceptance) |
 
 ## License
 

@@ -68,8 +68,16 @@ const handle = await subprocess.spawnTerminal({
 | 接口 | 来源 | 可用性 |
 | --- | --- | --- |
 | `ctx.sidebarRight.openTab(kind, options)` / `focus` / `isExpanded` / `toggleExpanded` / `openTabs` | `@deepseek-ai/dsh-client-ui-sidebar-right` | 已收录于 `docs/client-contract.md §7.8`，但**必须软注入** |
+| `ctx.sidebarRight.tabsIn(sessionId)` | 同上（`SidebarRightController` 的公开方法，不在 `ISidebarRight` 接口里，运行时存在） | **认领新标签的首选读法**：返回该会话已提交的 `TabRecord[]`（`{ id, kind, contentId, title }`）。不是接口成员，所以必须能力探测；读不到才退回摊平清单 |
+| `ctx.sidebarRight.tabDomain.occurrence(sessionId, { id })` | 同上（公开属性） | 读一个标签的 `navigation.params`，用来识别 Agent 自己开的终端（带 `terminalId`）并跳过 |
 | `ctx.sidebarRightTabs.get(kind)` / `subscribe` | 同上 | 已收录 |
-| `ctx.webTerminals.view(...)` / `launchShells` / `recover` | `@deepseek-ai/dsh-api-terminal-controller/client`（类型公开，服务名 `webTerminals`） | **未收录于本仓库 `docs/client-contract.md` §7**，属于新发现的上游事实，需要能力探测 + 失败降级 |
+| `ctx.webTerminals.view(sessionId, key, contentId, terminalId?, shellPath?)` / `launchShells` / `recover` | `@deepseek-ai/dsh-api-terminal-controller/client`（类型公开，服务名 `webTerminals`） | **未收录于本仓库 `docs/client-contract.md` §7**，属于新发现的上游事实，需要能力探测 + 失败降级 |
+
+**摊平清单的陷阱（`0.2.2-rc.5` 实测）**：`sidebarRight.openTabs` 把**所有会话**的标签摊平成一份
+（`SidebarTabInventory` 在启动时还会读 localStorage 里所有已保存的布局，包括从未在本窗口挂载的会话），
+而标签 id 是**每个会话各自的计数器**（`tab1`、`tab2`…）。因此「用 tabId 做增量」在真实 profile 里几乎必然误判：
+别的会话早就有 `tab2`，本会话新开的终端也叫 `tab2`，增量把它当成「已经开着」，3 秒后报
+`the terminal tab did not appear`——而终端其实已经出现在右侧栏里。修法见 §4.2 与 §4.5。
 
 `webTerminals` 服务的装配在 `dsh-web-app` 的浏览器名单里（`terminal-controller` + `ui-sidebar-terminal` 两行），
 所以本机 desktop profile 一定存在；但组合可裁剪，插件不能假定它一定在。
@@ -153,30 +161,38 @@ click(row)
   ├─ 若 opening 集合里已有该 pathKey → 直接返回（防重入）
   ├─ 前置检查：sessionId 存在、目录存在、能力可用
   ├─ 1. 复用：localStorage 里该 (sessionId, pathKey) 的 contentId
-  │     在 openTabs 快照里找到同 sessionId + contentId 的标签？
-  │       ├─ 找到 → sidebarRight.focus(tabId)；isExpanded() 为 false 时先 toggleExpanded()
+  │     在本会话自己的标签里找到同 contentId 的标签？
+  │       ├─ 找到 → sidebarRight.focus(tab.id)；isExpanded() 为 false 时先 toggleExpanded()
   │       └─ 没找到 → 进入 2
-  ├─ 2. 记录 before = new Set(openTabs.getSnapshot() 的 tabId)
+  ├─ 2. 记录 before = 本会话标签的 contentId 集合（不是 tabId！）
   ├─ 3. sidebarRight.openTab('terminal')            // 不传 params：沿用用户记住的 shell
-  ├─ 4. 等 openTabs 出现新记录：kind==='terminal' 且 tabId ∉ before
-  │     （超时 3s → notice 打开失败，清理监听）
-  ├─ 5. 校验 newTab.sessionId === 本次点击的 sessionId，不符则 sidebarRight.close(tabId) 并报错
-  ├─ 6. 写入映射 localStorage(sessionId, pathKey → contentId)，并刷新打开状态
-  ├─ 7. view = webTerminals.view(sessionId, tabId, contentId)   // 与正文/标题共用同一模型
-  ├─ 8. 等 state.writable === true 且 info.state === 'running'（超时 10s → notice）
-  ├─ 9. 附加根：view.write(cdCommand(info.shell, root.resolvedPath) + '\r')
+  ├─ 4. 认领：本会话标签里 kind==='terminal'、contentId ∉ before、且 navigation.params.terminalId 不存在
+  │     （优先 sidebarRight.tabsIn(sessionId)；没有该读法时退回摊平清单但按 sessionId 过滤）
+  │     （openTab 的提交是同步的，所以第 4 步通常在调用栈内就完成；3s 超时只是兜底）
+  ├─ 5. 写入映射 localStorage(sessionId, pathKey → contentId)，并刷新打开状态
+  ├─ 6. view = webTerminals.view(sessionId, tab.id, tab.contentId)   // 与正文/标题共用同一模型
+  ├─ 7. 等 state.writable === true 且 info.state === 'running'（超时 10s → notice）
+  ├─ 8. 附加根：view.write(cdCommand(info.shell, root.resolvedPath) + '\r')
   │     主根：跳过（初始 cwd 已是它）
-  ├─ 10. view.rename(root.label || 目录名)          // 标签标题 = 项目名
-  └─ 11. 清理监听/超时；opening 集合移除
+  ├─ 9. view.rename(root.label || 目录名)          // 标签标题 = 项目名
+  └─ 10. 清理监听/超时；opening 集合移除
 ```
 
 要点：
 
-- **时序全部走订阅，不做 sleep 轮询**：`openTabs` 是 `ObservableSnapshot`，`view.state` 是 `SnapshotStore`，两处都能 `subscribe`。
-- `openTab` 不返回标签 id（`placeTab` 的 `settled` 回调不对外暴露），所以第 4 步只能从清单增量里认领；`contentId` 是随机 UUID，不能预先构造（`.../dsh-client-ui-sidebar-right/lib/client.js:6449-6457`）。
-- 第 8 步是**必须**的：`write()` 在不可写时直接返回（`.../dsh-api-terminal-controller/lib/client.js:271-277`），早写会被静默丢弃。
-- 标题在第 10 步写：`TerminalTitle` 读 `state.info.title`，rename 会更新标签标题（`.../dsh-client-ui-sidebar-terminal/lib/client.js:224-226`）。
-- 若标签正文尚未挂载（用户恰好在别的会话/面板），`view` 仍会创建模型但只有正文挂载后才会创建进程；第 8 步的等待自然覆盖。
+- **标识用 contentId，不用 tabId**：`tabId` 是每个会话自己的计数器（`tab1`、`tab2`…），
+  而清单是所有会话摊平的，两者相乘就是「刚开的终端被判成已存在」那个 bug；`contentId` 是每次打开唯一的
+  `sidebar://terminal/<uuid>`，天然可做增量键。本会话自己的标签优先从 `sidebarRight.tabsIn(sessionId)` 读，
+  这样即使同一个根上有多个会话也不会互相干扰。
+- **提交是同步的**：`openTab` 内部 `openContent` → store commit → adoption 订阅 → inventory 更新都在返回前完成；
+  上游自己的终端插件就是这么认领的（`dsh-client-ui-sidebar-terminal` 的 `openTabIn(...)` 后立刻读 `tabsIn`），
+  所以不需要 sleep，也不需要「等清单刷新」。订阅 + 3s 超时是给不提供 `tabsIn` 的组合留的兜底。
+- `openTab` 不返回标签 id（`placeTab` 的 `settled` 回调不对外暴露），`contentId` 是随机 UUID，不能预先构造。
+- 第 7 步是**必须**的：`write()` 在不可写时直接返回，早写会被静默丢弃。
+- 标题在第 9 步写：`TerminalTitle` 读 `state.info.title`，rename 会更新标签标题。
+- **Agent 自己开的终端不参与认领**：那种标签带 `navigation.params.terminalId`，往里写 `cd` 会驱动 Agent 的进程；
+  `tabDomain.occurrence(...).navigation.params` 可读时必须跳过它们。
+- 若标签正文尚未挂载（用户恰好在别的会话/面板），`view` 仍会创建模型但只有正文挂载后才会创建进程；第 7 步的等待自然覆盖。
 
 ### 4.3 `cd` 命令构造
 
@@ -205,8 +221,14 @@ click(row)
   `dsh.code-workspace.project-shells.v1`
   值：`{ version: 1, entries: [{ sessionId, path, contentId, at }] }`，按 `at` 最近优先，上限 64 条。
 - **用 `contentId` 而不是 `tabId` 做持久键**：上游明确说「layout-local tab ids only identify live view occurrences」，恢复视图复用 contentId
-  （`.../dsh-api-terminal-controller/README.md:58`）。刷新后从 `openTabs` 里按 contentId 找回当前 `tabId`，再聚焦/写入。
-- 读取时校验：条目仍在 `openTabs` 里才复用；stale 条目在下一次写入时清掉。storage 不可用/损坏不阻塞功能（try/catch，退化为每次新开）。
+  （`.../dsh-api-terminal-controller/README.md:58`）。刷新后从本会话标签里按 contentId 找回当前 `tabId`，再聚焦/写入。
+- **`tabId` 连「认出刚开的那一个」都不该用**：它是每个会话自己的计数器，而 `openTabs` 是所有会话摊平的清单
+  （启动时还包含 localStorage 里每个已保存会话的布局）。同一个 `tab2` 在多个会话里同时存在是常态，
+  按 tabId 做增量等于把「别的会话有 tab2」误读成「本次点击的 tab2 已经开着」。
+  这是 `0.2.2-rc.5` 上「终端打开失败: the terminal tab did not appear」的根因：终端确实打开了，
+  但标签从未被认领，于是没有 `cd`、没有改名、也没有写进这张映射；再点一次会再开一只。
+- 读取时校验：条目仍在本会话的标签里才复用；stale 条目在下一次写入时清掉。storage 不可用/损坏不阻塞功能
+  （try/catch，退化为每次新开）。
 - 多窗口：`openTabs` 是**本窗口**的清单，另一个窗口的终端不会误聚焦；contentId 全局唯一所以不会串。
 
 ### 4.6 状态与错误
@@ -297,7 +319,7 @@ sidebarRightTabs: { get: (kind) => kind === 'terminal' ? { kind } : undefined, s
 | `docs/client-contract.md` | 新增 `§7.10 webTerminals`：服务名、`view/write/rename`、`(sessionId,key)` 身份、`write` 只在可写时生效、证据行号；并注明它未列入 `SERVICE_API` 八项目录，必须能力探测 |
 | `docs/design-project-shells.md` | 本文（实现后删除或折叠） |
 
-版本：`0.2.0`（向后兼容的新功能）。发布到 npm 与装进 desktop profile 由用户执行。
+版本：`0.2.0`（向后兼容的新功能），`0.2.1` 修正 rc.5 的标签认领与「Open In…」接管（见 §11）。发布到 npm 与装进 desktop profile 由用户执行。
 
 ## 7. 风险与已知边界
 
@@ -340,3 +362,49 @@ sidebarRightTabs: { get: (kind) => kind === 'terminal' ? { kind } : undefined, s
 3. 再次点击：现在设计是「聚焦已有终端」；若你更想「每次都新开」，只需去掉去重。
 4. 是否也加一个「在终端中打开会话根」的全局按钮（面板顶部动作行），还是只保留行内快捷按钮。
 5. `cd` 可见这个代价你是否接受（替代方案只有外部终端窗口）。
+
+## 11. 实测修正（DSH `0.2.2-rc.5`，桌面应用）
+
+本节记录上线后**在真实桌面应用里**复现、定位并修掉的两个问题；它们都不改变上面的设计结论，只把「认领」的标识与一个插槽细节改对。
+
+### 11.1 「终端打开失败: the terminal tab did not appear」
+
+**现象**：点击项目行的 `>_`，面板红字报 `终端打开失败: the terminal tab did not appear`，但右侧栏其实已经多了一只终端标签；
+再点一次会再开一只，没有 `cd`、没有改名。
+
+**复现**（rc.5 真实实例，Playwright 驱动，非模拟）：一个新会话刚开第一只终端拿到 `tab2`；
+把 localStorage 里**另一个会话**的已保存布局写成同样含 `tab2`（合法的 `{ layout, minted: 2 }`）后点击 `>_`：
+
+| 观测 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 面板提示 | `终端打开失败：the terminal tab did not appear` | `已在 DSH 终端中打开「dsh-multiroot-workspace」。` |
+| 右侧栏终端 | 1 只（已打开，但未被认领） | 1 只（被认领） |
+| `localStorage` 映射 | 空（下次点击会再开一只） | 写入 contentId |
+
+**根因**：`openTabs` 是所有会话摊平的清单，`tabId` 却是每个会话自己的计数器；旧代码用 `before[tab.tabId]`
+做增量，别的会话的 `tab2` 让本次新开的 `tab2` 被永远跳过。3 秒计时器随后报的其实是「没认领到」，
+而不是「没打开」。上游自己的终端插件用的是 `tabsIn(sessionId)` + contentId，本插件现在同构。
+
+**修法**：`sessionTabs(sessionId)`（优先 `sidebarRight.tabsIn`，退回摊平清单并按 `sessionId` 过滤）+
+按 `contentId` 做增量 + 同步认领 + 跳过 `params.terminalId` 的 Agent 终端；不再关闭任何别会话的标签。
+`test/client.test.mjs` 新增了「同一 `tabId` 出现在两个会话」的回归用例（`scopedRead` 两种读法各一条）
+与「Agent 终端不被认领」用例。
+
+### 11.2 「Open In…」接管在 rc.5 上抛错
+
+**现象**：浏览器控制台 `TypeError: Cannot read properties of undefined (reading 'openInAppFamily')`，
+`slot entry crashed in 'conversation.session.header.utilities'`——接管控件把宿主原本的「Open In…」挡掉了，
+自己却没渲染出来，用户等于丢了那个控件。
+
+**根因**：rc.5 不再把注册方自己塞进 `inject` 返回值里的 `hooks` 包原样交给组件（`props.hooks` 变成槽位自己的
+钩子容器），而旧代码只从 `props.hooks` 取清单/选择/启动三个 store。
+
+**修法**：接管用的控制器提升为插件级单例（`openInAppRuntime`），组件先读 `props.hooks.*`，
+读不到就用单例；`useMenuStore(store, fallback)` 对缺失/形状不对的 store 返回兜底值而不是抛错。
+这样「宿主照旧传」和「宿主不传」两种组合都能渲染，槽位错误不会再连累官方控件。
+
+### 11.3 仍然成立的上游边界
+
+- 终端创建接口仍没有 `cwd`（`TerminalCreateRequest` 无该字段），`cd` 依旧是唯一诚实做法。
+- 终端标签的 `multiple: true` 在 rc.5 仍在，所以「每个 folder 一只标签」成立，contentId 每次打开唯一。
+- `tabsIn` / `tabDomain` 不在 `ISidebarRight` 接口里，属于实现上的公开成员：必须能力探测，读不到时退回摊平清单。

@@ -1089,7 +1089,7 @@ test('adding a folder sends the typed path and clears the field', async () => {
   expand(view.component(kit()))
   await flush()
   let tree = expand(view.component(kit()))
-  const pathInput = inputsIn(tree).find((input) => input.props.placeholder.includes('文件夹路径'))
+  const pathInput = inputsIn(tree).find((input) => input.props['data-field'] === 'add-path')
   assert.ok(pathInput, 'the folder path field must exist')
   pathInput.props.onChange({ target: { value: 'D:/third' } })
   tree = expand(view.component(kit()))
@@ -1100,7 +1100,7 @@ test('adding a folder sends the typed path and clears the field', async () => {
   assert.ok(commandLog.some((call) => call.line === '/code-workspace add "D:/third"'), JSON.stringify(commandLog))
   // The field is cleared optimistically.
   tree = expand(view.component(kit()))
-  const cleared = inputsIn(tree).find((input) => input.props.placeholder.includes('文件夹路径'))
+  const cleared = inputsIn(tree).find((input) => input.props['data-field'] === 'add-path')
   assert.equal(cleared.props.value, '')
 })
 
@@ -1537,12 +1537,27 @@ function terminalButton(row) {
   return button
 }
 
-/** One fake terminal tab, in the shape the sidebar inventory reports. */
-let terminalTabSerial = 0
+/**
+ * One fake terminal tab, in the shape the sidebar reports it.
+ *
+ * Ids are minted by a **per-session** counter, exactly as the runtime mints
+ * them: two sessions routinely hold the same `tab1`, which is the collision the
+ * project-terminal delta has to survive. The content id is unique per open.
+ */
+const terminalSerial = new Map()
 function terminalTab(overrides = {}) {
-  terminalTabSerial += 1
+  const sessionId = overrides.sessionId || 'session-1'
+  const next = (terminalSerial.get(sessionId) || 0) + 1
+  terminalSerial.set(sessionId, next)
   return Object.assign(
-    { sessionId: 'session-1', tabId: 'tab-' + terminalTabSerial, kind: 'terminal', contentId: 'content-' + terminalTabSerial },
+    {
+      sessionId,
+      tabId: 'tab' + next,
+      id: 'tab' + next,
+      kind: 'terminal',
+      contentId: 'content-' + sessionId + '-' + next,
+      title: 'terminal',
+    },
     overrides,
   )
 }
@@ -1552,53 +1567,70 @@ function terminalTab(overrides = {}) {
  *
  * Defaults to a writable PowerShell view, so the happy path settles inside the
  * click; individual tests override the shell, the view state or the tab that
- * `openTab` allocates.
+ * `openTab` allocates. The flat `openTabs` inventory holds every session's tabs
+ * at once (as the runtime's does), while `tabsIn(sessionId)` reads one session's
+ * own records; `scopedRead: false` models a runtime without that scoped read.
  */
 function terminalStub(options = {}) {
   const calls = { openTab: [], focus: [], close: [], write: [], rename: [], view: [] }
   const listeners = []
   let expanded = options.expanded === true
-  let tabs = (options.tabs || []).slice()
+  let inventory = (options.tabs || []).concat(options.foreignTabs || [])
+  const ownTabs = () => inventory.filter((tab) => tab.sessionId === 'session-1')
   const views = new Map()
   const shellPath = options.shellPath || 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
   const viewState = options.viewState || {}
   const publish = () => {
     for (const listener of listeners.slice()) listener()
   }
-  const services = {
-    sidebarRight: {
-      openTab(kind, opts) {
-        calls.openTab.push({ kind, opts })
-        const tab = options.tabFor ? options.tabFor(calls) : terminalTab()
-        tabs = tabs.concat([tab])
-        publish()
-      },
-      focus(tabId) {
-        calls.focus.push(tabId)
-      },
-      isExpanded() {
-        return expanded
-      },
-      toggleExpanded() {
-        expanded = !expanded
-        calls.toggleExpanded = (calls.toggleExpanded || 0) + 1
-      },
-      close(tabId) {
-        calls.close.push(tabId)
-        tabs = tabs.filter((tab) => tab.tabId !== tabId)
-        publish()
-      },
-      openTabs: {
-        getSnapshot: () => tabs,
-        subscribe(listener) {
-          listeners.push(listener)
-          return () => {
-            const index = listeners.indexOf(listener)
-            if (index >= 0) listeners.splice(index, 1)
-          }
-        },
+  const record = (tab) => ({ id: tab.id === undefined ? tab.tabId : tab.id, kind: tab.kind, contentId: tab.contentId, title: tab.title || '' })
+  const sidebarRight = {
+    openTab(kind, opts) {
+      calls.openTab.push({ kind, opts })
+      const allocated = typeof options.tabFor === 'function' ? options.tabFor(calls) : terminalTab()
+      inventory = inventory.concat(Array.isArray(allocated) ? allocated : [allocated])
+      publish()
+    },
+    focus(tabId) {
+      calls.focus.push(tabId)
+    },
+    isExpanded() {
+      return expanded
+    },
+    toggleExpanded() {
+      expanded = !expanded
+      calls.toggleExpanded = (calls.toggleExpanded || 0) + 1
+    },
+    close(tabId) {
+      calls.close.push(tabId)
+      inventory = inventory.filter((tab) => (tab.id === undefined ? tab.tabId : tab.id) !== tabId)
+      publish()
+    },
+    openTabs: {
+      getSnapshot: () => inventory,
+      subscribe(listener) {
+        listeners.push(listener)
+        return () => {
+          const index = listeners.indexOf(listener)
+          if (index >= 0) listeners.splice(index, 1)
+        }
       },
     },
+  }
+  if (options.scopedRead !== false) {
+    sidebarRight.tabsIn = (sessionId) => inventory.filter((tab) => tab.sessionId === sessionId).map(record)
+  }
+  if (options.agentTerminals !== undefined) {
+    sidebarRight.tabDomain = {
+      occurrence(sessionId, reference) {
+        const id = reference && reference.id
+        const agent = Object.prototype.hasOwnProperty.call(options.agentTerminals, id)
+        return { navigation: { getSnapshot: () => ({ address: 'sidebar://terminal/' + String(id), params: agent ? { terminalId: options.agentTerminals[id] } : undefined }) } }
+      },
+    }
+  }
+  const services = {
+    sidebarRight,
     webTerminals: {
       view(sessionId, key, contentId) {
         calls.view.push({ sessionId, key, contentId })
@@ -1643,9 +1675,10 @@ function terminalStub(options = {}) {
   return {
     services,
     calls,
-    tabs: () => tabs,
+    tabs: ownTabs,
+    allTabs: () => inventory,
     removeTab(tabId) {
-      tabs = tabs.filter((tab) => tab.tabId !== tabId)
+      inventory = inventory.filter((tab) => (tab.id === undefined ? tab.tabId : tab.id) !== tabId)
       publish()
     },
   }
@@ -1795,19 +1828,74 @@ test('a terminal that fails to start explains itself', async () => {
   assert.match(textOf(expand(view.component(kit()))), /终端打开失败：no shell on this host/)
 })
 
-test('a tab that landed in another session is closed instead of typed into', async () => {
-  const terminals = terminalStub({
-    tabFor: () => ({ sessionId: 'session-2', tabId: 'tab-foreign', kind: 'terminal', contentId: 'content-foreign' }),
-  })
+test('another session\'s terminal tab is never claimed, focused or closed', async () => {
+  // The flat inventory holds every session's tabs; only this session's own tabs
+  // are candidates for the folder shell.
+  const terminals = terminalStub({ foreignTabs: [terminalTab({ sessionId: 'session-2' })] })
   const { view } = await boot({ services: terminals.services })
   expand(view.component(kit()))
   await flush()
   terminalButton(rowByPath(expand(view.component(kit())), 'D:/other')).props.onClick()
   await flush()
   assert.equal(terminals.calls.openTab.length, 1)
-  assert.deepEqual(terminals.calls.close, ['tab-foreign'], 'the foreign tab is closed, never used')
-  assert.deepEqual(terminals.calls.write, [], 'no path is typed into a foreign session')
-  assert.match(textOf(expand(view.component(kit()))), /终端打开失败/)
+  assert.deepEqual(terminals.calls.close, [], 'another session\'s tab is left alone')
+  assert.deepEqual(terminals.calls.focus, [], 'the foreign tab is not the remembered project terminal')
+  assert.equal(terminals.calls.view.length, 1)
+  assert.equal(terminals.calls.view[0].sessionId, 'session-1', 'the view is borrowed for this session only')
+  assert.match(textOf(expand(view.component(kit()))), /已在 DSH 终端中打开/)
+})
+
+for (const scopedRead of [true, false]) {
+  const label = scopedRead ? 'with the session-scoped tab read' : 'on the flat inventory only'
+  test('a foreign session holding the same per-session tab id does not hide the tab this click opened (' + label + ')', async () => {
+    // Ids are minted per session, so a first terminal in two sessions is `tab1` in
+    // both. A delta keyed by bare tabId treats the new tab as already open and
+    // times out with "the terminal tab did not appear" while the tab is on screen;
+    // the content id is unique per open, so the delta must key by it.
+    const collision = 'tab7'
+    const foreign = terminalTab({ sessionId: 'session-2', tabId: collision, id: collision })
+    const terminals = terminalStub({
+      foreignTabs: [foreign],
+      scopedRead: scopedRead,
+      tabFor: () => terminalTab({ tabId: collision, id: collision }),
+    })
+    const booted = await boot({ services: terminals.services, onCommand: () => commandOk(STATE) })
+    const { view } = booted
+    expand(view.component(kit()))
+    await flush()
+    terminalButton(rowByPath(expand(view.component(kit())), 'D:/other')).props.onClick()
+    await flush()
+    const tree = expand(view.component(kit()))
+    assert.doesNotMatch(textOf(tree), /终端打开失败/)
+    assert.match(textOf(tree), /已在 DSH 终端中打开「Other」/)
+    const opened = terminals.tabs().find((tab) => tab.sessionId === 'session-1' && tab.kind === 'terminal')
+    assert.ok(opened, 'the click opened one terminal tab for this session')
+    assert.equal(opened.id, collision, 'the new tab really reuses the foreign session\'s id')
+    assert.deepEqual(terminals.calls.view.map((entry) => entry.key), [opened.id], 'the borrowed view is this tab, not the foreign one')
+    assert.deepEqual(terminals.calls.write, ["Set-Location -LiteralPath 'D:/other'\r"], 'the additional root still gets its cd')
+    assert.deepEqual(terminals.calls.close, [], 'the foreign tab is never closed')
+    const remembered = JSON.parse(booted.localStorage.getItem('dsh.code-workspace.project-shells.v1'))
+    assert.equal(remembered.entries[0].contentId, opened.contentId, 'the identity remembered is the content id, not a tab id')
+  })
+}
+
+test('an Agent\'s own terminal tab is skipped instead of receiving the folder cd', async () => {
+  // Agent terminals carry params.terminalId; typing a cd into one would drive the
+  // Agent's process, so the claim walks past it to the shell this click opened.
+  const agentTab = { sessionId: 'session-1', tabId: 'tab2', id: 'tab2', kind: 'terminal', contentId: 'content-agent', title: 'terminal' }
+  const userTab = { sessionId: 'session-1', tabId: 'tab3', id: 'tab3', kind: 'terminal', contentId: 'content-user', title: 'terminal' }
+  const terminals = terminalStub({
+    agentTerminals: { tab2: 'host-terminal-1' },
+    tabFor: () => [agentTab, userTab],
+  })
+  const { view } = await boot({ services: terminals.services, onCommand: () => commandOk(STATE) })
+  expand(view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(view.component(kit())), 'D:/other')).props.onClick()
+  await flush()
+  assert.deepEqual(terminals.calls.view.map((entry) => entry.key), ['tab3'], 'only the user shell is borrowed')
+  assert.deepEqual(terminals.calls.write, ["Set-Location -LiteralPath 'D:/other'\r"])
+  assert.match(textOf(expand(view.component(kit()))), /已在 DSH 终端中打开「Other」/)
 })
 
 test('a missing folder disables its terminal shortcut instead of opening it', async () => {
@@ -1842,4 +1930,118 @@ test('the sessionless panel explains where the terminal shortcut lives', async (
   const tree = expand(panel.component({}))
   assert.match(textOf(tree), /内置终端按会话提供/)
   assert.equal(buttonsIn(tree).filter((button) => textOf(button) === '>_').length, 0)
+})
+
+// ------------------------------------------------ the redesigned page (spec §8.1)
+
+test('the page is headed by the workspace file name, and the one-time tab explainer is gone', async () => {
+  const { view } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  const headings = nodesWhere(tree, (node) => node.type === 'h1')
+  assert.equal(headings.length, 1, 'the page has exactly one H1')
+  // The tab strip already says "Code Workspace"; the page title answers "which
+  // workspace", which is the file name.
+  assert.equal(textOf(headings[0]), 'app.code-workspace')
+  // The permanent explainer line was removed from the render (its key stays).
+  assert.doesNotMatch(textOf(tree), /工作区是「对话/)
+  // The full path is still on the page, as the identity card's subtitle.
+  assert.match(textOf(tree), /D:\/ws\/app\.code-workspace/)
+})
+
+test('the add-folder form has visible labels and data-field hooks, and an empty path disables the button', async () => {
+  const { view } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  const pathInput = inputsIn(tree).find((input) => input.props['data-field'] === 'add-path')
+  const nameInput = inputsIn(tree).find((input) => input.props['data-field'] === 'add-name')
+  assert.ok(pathInput, 'the path field must be addressable by data-field')
+  assert.ok(nameInput, 'the name field must be addressable by data-field')
+  // The label is a visible node now; the placeholder is an example.
+  assert.match(textOf(tree), /文件夹路径（相对或绝对）/)
+  assert.match(textOf(tree), /显示名称（可选）/)
+  assert.equal(pathInput.props.placeholder, '例如 D:/projects/my-app')
+  assert.equal(nameInput.props.placeholder, '留空则显示目录名')
+  assert.equal(buttonByLabel(tree, '添加文件夹').props.disabled, true, 'an empty path cannot be submitted')
+  pathInput.props.onChange({ target: { value: 'D:/third' } })
+  assert.equal(buttonByLabel(expand(view.component(kit())), '添加文件夹').props.disabled, false)
+})
+
+test('a failed read is a dismissible alert banner, and closing it clears the state', async () => {
+  const { view } = await boot({
+    onCommand: () => ({ ok: true, value: { commandId: 'c1', result: { kind: 'error', text: 'code-workspace: boom' } } }),
+  })
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  const alerts = nodesWhere(tree, (node) => node.props && node.props.role === 'alert')
+  assert.equal(alerts.length, 1, 'a failure must announce itself as an alert')
+  assert.match(textOf(alerts[0]), /boom/)
+  const close = buttonsIn(alerts[0]).find((button) => button.props.title === '关闭')
+  assert.ok(close, 'the banner must be closable')
+  close.props.onClick()
+  const after = expand(view.component(kit()))
+  assert.equal(nodesWhere(after, (node) => node.props && node.props.role === 'alert').length, 0, 'closing must remove it')
+})
+
+test('a write in flight marks the page busy and disables the controls that would write', async () => {
+  const pending = new Promise(() => {})
+  const { view } = await boot({ onCommand: (line) => (line === '/code-workspace list' ? commandOk(STATE) : pending) })
+  expand(view.component(kit()))
+  await flush()
+  const pathInput = inputsIn(expand(view.component(kit()))).find((input) => input.props['data-field'] === 'add-path')
+  pathInput.props.onChange({ target: { value: 'D:/third' } })
+  buttonByLabel(expand(view.component(kit())), '添加文件夹').props.onClick()
+  const busyTree = expand(view.component(kit()))
+  assert.ok(nodesWhere(busyTree, (node) => node.props && node.props['aria-busy'] === 'true').length > 0, 'the page root reports aria-busy')
+  assert.match(textOf(busyTree), /处理中…/)
+  assert.equal(buttonByLabel(busyTree, '添加文件夹').props.disabled, true)
+  assert.equal(inputsIn(busyTree).find((input) => input.props['data-field'] === 'add-path').props.disabled, true)
+})
+
+test('removing a folder asks first, then issues the indexed remove', async () => {
+  const { view, commandLog, confirmations } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  buttonByTitle(expand(view.component(kit())), '移除').props.onClick()
+  await flush()
+  assert.equal(confirmations.length, 1, 'the destructive row action must be confirmed')
+  assert.match(confirmations[0], /移除「ws」/)
+  assert.ok(commandLog.some((call) => call.line === '/code-workspace remove 0'), JSON.stringify(commandLog))
+})
+
+test('the page-level unlink is not the manager row, asks first, and issues the unlink command', async () => {
+  const { view, commandLog, confirmations } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  const unlink = buttonByLabel(tree, '取消关联')
+  assert.ok(unlink, 'the identity card must offer the unlink action')
+  // An accessible-name lookup for 取消关联 must find the MANAGER row first, so
+  // this page-level button deliberately carries no title.
+  assert.equal(unlink.props.title, undefined)
+  unlink.props.onClick()
+  await flush()
+  assert.equal(confirmations.length, 1)
+  assert.match(confirmations[0], /不再使用这个工作区文件/)
+  assert.ok(commandLog.some((call) => call.line === '/code-workspace use ""'), JSON.stringify(commandLog))
+})
+
+test('paths are copyable and every icon-only control carries a tooltip and an accessible name', async () => {
+  const { view } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  const copy = buttonByTitle(tree, '复制路径')
+  assert.ok(copy, 'a path copy action must exist')
+  assert.equal(copy.props['aria-label'], '复制路径')
+  assert.ok(nodesWhere(tree, (node) => node.props && node.props.title === '拖动排序').length > 0, 'the drag handle has a tooltip')
+  for (const glyph of ['>_', '↑', '↓', '✎', '⧉', '✕', '⟳']) {
+    for (const button of buttonsIn(tree).filter((entry) => textOf(entry) === glyph)) {
+      assert.ok(button.props.title, 'the ' + glyph + ' control must have a tooltip')
+      assert.ok(button.props['aria-label'], 'the ' + glyph + ' control must have an accessible name')
+    }
+  }
 })
