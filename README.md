@@ -20,6 +20,7 @@ Zero build step — `lib/index.js` is plain ESM for the Host, `lib/client.js` is
 | Extra keys inside one folder entry (newer VS Code writes an `icon`) | Preserved verbatim |
 | A multi-root window | The session root is the **first `folders[]` entry that exists on disk**; every other folder becomes an additional root, and the file's own directory only says where the file lives |
 | Opening the window from Harness | The editor is launched with the `.code-workspace` file itself: `Code.exe <file>` / `Trae CN.exe <file>` — the VS Code family's own CLI contract for "open this multi-root workspace", which the shipped "Open In…" route cannot express (it validates a directory) |
+| A terminal per folder | One `>_` button on each folder row hands the folder to DSH's **own** right-sidebar terminal (not an external window), titled with the project name; an additional root is entered with a `cd` typed into the shell, because the terminal-create API has no cwd |
 | A malformed workspace file | The panel shows the exact line/column; no roots are granted (fail closed) |
 
 A DSH workspace is a **single directory**, and `workspaceRegistry.create()` refuses anything that is not one, so the plugin derives the session root from the file: the first folder that exists on disk, and the file's own directory only when no folder qualifies.
@@ -177,6 +178,7 @@ Every surface shows the workspace file path, the **workspace root** it derives, 
 - **Rename** — set `folders[].name`
 - **Remove**
 - **Show in file manager**
+- **Open in DSH terminal** — one `>_` button per folder row, handing it to the right Sidebar's built-in terminal (see below)
 - **Open in editor** — one button per VS Code-family editor found on the host (see below)
 - **Switch file** / **Recent** / **New workspace file** / **Unlink**
 
@@ -218,6 +220,21 @@ The family, in the order the panel offers it and the automatic choice follows it
 
 The remembered editor is stored per browser under `dsh.code-workspace.editor`; the keyboard shortcut the shipped plugin owns (`Ctrl+Alt+O`) is deliberately untouched.
 
+### A terminal per folder
+
+The leftmost button on each folder row is `>_` (first in the `↑ ↓ ✎ ⧉ ✕` group). It opens DSH's **own** interactive terminal in the right Sidebar — not an external terminal window. The PTY, screen recovery, quota and process cleanup belong to the upstream terminal service; this plugin only supplies the entry point and the directory.
+
+- **Primary root** (the session root): opened directly at the session cwd, with no extra command typed.
+- **Additional roots**: the shell starts at the session cwd, then the plugin writes a `cd` into the PTY (`Set-Location -LiteralPath` for PowerShell, `cd /d` for cmd, plain `cd` for POSIX shells, with Windows drive paths converted to the MSYS spelling). **That line stays visible on screen** — upstream `terminal/create` accepts only `shellPath` / `id` / `cols` / `rows` and has no cwd field, so this is the only honest way to land in the directory.
+- **The tab is titled** with the project's display name; clicking the same project again expands the column and focuses the existing tab instead of allocating another shell.
+- **Per session**: a terminal belongs to the current session; switching sessions switches the set.
+- **Quota**: 8 terminals per session by default, and exited terminals count too; at the limit the panel says to close unused ones.
+- **After a reload**: the upstream service restores processes and tabs; the plugin remembers which project maps to which tab by `contentId` (the identity that survives a page life), so a click focuses rather than duplicates.
+- **Sessionless pages cannot use it**: the left-column page and the creation popover have no session, so the right Sidebar has nothing to attach a terminal to; those pages show no button and one explanatory line instead.
+- **Trimmed compositions**: without the right Sidebar or the terminal plugin the whole feature disappears and the rest of the panel keeps working.
+
+The shortcut never goes through the host plugin: the terminal is the existing browser ↔ host channel, so there is no new endpoint, no store change, and nothing added to the prompt or the tools. ⚠️ The built-in terminal runs with **system-user permissions**, independent of the Agent sandbox — see the permission model below.
+
 ### The `@` menu
 
 Typing `@` adds one group per folder beside the built-in workspace group. An empty query lists the folders as entry points, `@main` ranks across every root, and `@dsh-nl/src/` or `@D:/repo/src/` descends a level.
@@ -239,6 +256,10 @@ The DSH sandbox (the Windows ACL runner) grants each process tree exactly **one*
 - Reads are unfenced and need no `workdir`.
 
 This rule is injected into the system prompt, so the Agent knows it.
+
+### The built-in terminal is not sandboxed
+
+"Open in DSH terminal" starts a **user** terminal: it inherits the host's system-user permissions, regardless of the Agent's sandbox mode or approval policy. It can therefore read and write anywhere that user can, including outside the additional roots — that is DSH's existing design (user terminals and agent terminals are two different permission planes), not a way for this plugin to bypass the sandbox. The plugin decides **which directory** the terminal opens in; it never changes what the terminal may do. This boundary must remain visible in the docs.
 
 ### The workspace file is user-managed
 
@@ -267,13 +288,14 @@ A Workspace's identity in DSH is its root directory's `realpath`-canonicalised p
 | Editor icon | `lib/editor-icon.js` | One executable's associated icon for the family entries no shipped route serves; verified payload or nothing |
 | File dialog | `lib/workspace-picker.js` | The host's own file dialog for a `.code-workspace` file — the file-shaped sibling of the shipped directory-only picker; three outcomes (picked / cancelled / unavailable), injectable runner, no dialog in any test |
 | Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor and file-dialog endpoints |
-| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation dock chip and its popover, the "Open In…" takeover, `@` companion group |
+| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation dock chip and its popover, the "Open In…" takeover, `@` companion group, the per-folder built-in terminal shortcut |
 
 - **Discovery**: for a session rooted at `C`, the active file is (1) the file THIS SESSION picked, (2) `C`'s most recent explicit record — a tombstone there stops the search — (3) **adoption**: `C` holding exactly one `.code-workspace` file, (4) nothing, which makes the plugin inert for that session. Two or more candidates is a fail-closed tie. The old rule — "the recorded file whose *directory* is `C`" — is gone: with several files in one folder it returned whichever happened to be recorded first.
 - **Caching**: model 2 s, discovery 3 s, `@` index 4 s. `fs.stat` metadata is deliberately **not** used for invalidation — the fields an `FsInfo` carries are not part of the plugin-facing contract, so a stamp built from them could silently never change and pin a stale root set for a whole session. Panel and command reads always force a fresh parse, so the derived root is recomputed on every such read.
 - **Interception**: when a `write` / `edit` / `pwsh` / `bash` target lands in an additional root, the call is serviced with `{ ...standingPolicy, workspaceRoot: <that root> }`. The **mode is never touched**, so `read-only` still denies, `workspace-write` still allows, and `danger-full-access` still allows. Background runs register with `ctx.jobs` under the same policy.
 - **Sessionless channel**: `ctx.provide('codeWorkspace', api)` plus hand-written `src-json` Typert descriptors, keyed by **path** rather than a session id, so the session-creation page — which has no session yet — can read and edit the workspace file. `sessionId` is an optional extra parameter (`acceptsUndefined: true`) on the eleven endpoints whose answer can depend on which session asked — `state`, `open`, `forget`, `useFile`, `create`, `addFolder`, `removeFolder`, `renameFolder`, `moveFolder`, `openInEditor`, `listFiles`. Without it the answer is the per-root association, which is exactly what a new session inherits.
 - **State**: one host state object — `rootDir`, `fileDir`, `file`, `title`, `roots[]` (each with `isPrimary`, true only for the folder equal to the root), `extraRoots`, `conflict` (the other files naming this root), plus `warnings`, `error` and `indent`.
+- **Project terminals**: the client **soft-injects** the right Sidebar and terminal services with `ctx.inject(['sidebarRight', 'webTerminals', 'sidebarRightTabs'])` (any one missing and the whole feature disappears), allocates a tab with `sidebarRight.openTab('terminal')`, claims the new tab from the `openTabs` inventory delta (`openTab` returns no tab id), borrows the view with `webTerminals.view(sessionId, tabId, contentId)`, and writes the `cd` plus the tab `rename` once that view becomes writable. The `cd` is mandatory: the upstream create call has no cwd, so a shell always starts at the session root. The project → `contentId` mapping lives in browser `localStorage` (`dsh.code-workspace.project-shells.v1`, capped at 64 entries), never in the host store.
 - Config and the associations live in `<DSH_HOME>/storages/code-workspace/index.json`, outside every agent sandbox root and under a write guard. The store is `{ version: 2, files, roots: [{ root, file }], sessions: [{ session, file }] }`, most recent first, capped at 200 records per list. A v1 store keeps its `files` and invents no association; the first explicit pick writes one.
 
 ---
@@ -284,13 +306,13 @@ A Workspace's identity in DSH is its root directory's `realpath`-canonicalised p
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-Six files, 177 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
+Six files, 190 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), fakes for the right Sidebar and terminal services (the tab inventory, `openTab` and `view` all injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
 
 ```bash
 node test/jsonc.test.mjs              # 25 — JSONC parsing and comment-preserving rewrites
 node test/workspace-file.test.mjs     # 24 — VS Code path rules, folders CRUD, the derived root
 node test/host.test.mjs               # 50 — discovery, the store, re-rooting, refusals, command, remote API, @ discovery, editor guards
-node test/client.test.mjs             # 46 — bundle contract, slot registrations, panel interaction, the duplicate-root block, Open In… takeover, @ source
+node test/client.test.mjs             # 59 — bundle contract, slot registrations, panel interaction, the duplicate-root block, Open In… takeover, @ source, project-terminal shortcut
 node test/editor.test.mjs             # 22 — family resolution, proof-before-launch, child environment, launch outcomes, icons
 node test/workspace-picker.test.mjs   # 10 — the host file dialog's three outcomes, its injected runner
 ```
@@ -310,6 +332,8 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
 Measured on `0.2.0-rc.2`: **30/30** — the 25 checks it made before the editor feature, plus the five added with it (the served bundle carries the takeover, `codeWorkspace/editors` answers the family, and the two refusals an unknown id must hit). It never launches an editor: both editor calls it makes are refusals by construction. Its scratch workspace file declares `{ "path": "." }`, so the root the plugin derives from it is that scratch directory itself, and the check named `open registers the root the file derives as a DSH workspace` asserts that derived root rather than the directory holding the file.
+
+The project-terminal feature adds **one bundle-marker check** to that script (31 checks now): it requires the instance to serve a bundle that carries the project-terminal code. This repository's desktop profile still installs the old npm package, so that check has **not been measured on the desktop instance yet**; the client behaviour is pinned by `test/client.test.mjs` against fake right-Sidebar/terminal services.
 
 The Conversation view page is **not covered by that script** (it asserts host endpoints and bundle markers, not rendered UI): its registration, its entry point, its toggle, its degraded no-op and its per-session scoping are pinned by `test/client.test.mjs`. Rendering it inside a real Conversation tab strip has not been observed in a live browser yet. The same holds for the left-column row and the host file dialog: their registrations, their decisions and their fallbacks are pinned by tests, but the dialog itself has not been opened on a real desktop yet.
 
@@ -333,6 +357,7 @@ The Conversation view page is **not covered by that script** (it asserts host en
 | `tools/probe-index.mjs` | Dump one instance's index and report bundle injection |
 | `docs/client-contract.md` | The DSH 0.2.0-rc.2 client-plugin contract, citation-anchored |
 | `docs/design.md` | Architecture and invariants |
+| `docs/design-project-shells.md` | The project-terminal feature's design and trade-offs (implemented; stable conclusions folded into `docs/design.md`) |
 
 ## License
 

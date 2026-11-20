@@ -20,6 +20,7 @@
 | 文件夹条目里的额外键（如新版的 `icon`） | 原样保留 |
 | 多根窗口 | 会话根 = `folders[]` 里**第一个在磁盘上存在的目录**；其余 folder 全部作为附加根，文件自己的目录只表示文件放在哪 |
 | 从 Harness 打开窗口 | 用 `.code-workspace` 文件本身启动编辑器：`Code.exe <文件>` / `Trae CN.exe <文件>`，这正是 VS Code 家族「打开这个多根工作区」的 CLI 约定；官方「Open In…」路由做不到——它只接受**目录** |
+| 每个文件夹的终端 | 面板里每个 folder 行一个 `>_` 按钮：交给 DSH **自带**的右侧栏终端（不是外部窗口），标签名是项目名；附加根会在终端里自动 `cd` 进去——终端创建接口没有 cwd |
 | `.code-workspace` 损坏 | 面板显示具体行列号；此时不授予任何根（fail closed） |
 
 DSH 的工作区是**单根目录**，`workspaceRegistry.create()` 也只接受存在的目录，所以插件**从文件推导**会话根：磁盘上第一个存在的 folder；一个都不存在时才退回文件自己的目录。
@@ -169,6 +170,7 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 - **重命名**：设置 `folders[].name`
 - **移除**
 - **在资源管理器中显示**
+- **在 DSH 终端中打开**：每个 folder 行一个 `>_` 按钮，交给右侧栏的内置终端（见下）
 - **在编辑器中打开**：本机能证明存在的每个 VS Code 家族编辑器一个按钮（见下）
 - **切换文件** / **最近使用** / **新建工作区文件** / **取消关联**
 
@@ -210,6 +212,21 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 
 记住的选择存在浏览器本地键 `dsh.code-workspace.editor`；官方插件拥有的快捷键（`Ctrl+Alt+O`）刻意不动。
 
+### 每个项目打开 DSH 终端
+
+每个 folder 行的动作组最左边是 `>_` 快捷按钮（`↑ ↓ ✎ ⧉ ✕` 那一排的最前面）。点它在右侧栏打开 DSH **自带**的交互式终端——不是外部终端窗口；PTY、屏幕恢复、配额与进程清理都归上游终端服务，本插件只负责入口和目录。
+
+- **主根**（会话根）：直接打开，落在会话 cwd，不写任何额外命令。
+- **附加根**：终端按会话 cwd 启动后，插件向 PTY 写入一条 `cd`（PowerShell 用 `Set-Location -LiteralPath`，cmd 用 `cd /d`，其余 POSIX shell 用 `cd` 并把盘符路径转成 MSYS 形式）。**这条命令会显示在屏幕上**——上游 `terminal/create` 只接受 `shellPath` / `id` / `cols` / `rows`，没有 cwd 字段，这是唯一诚实的做法。
+- **标签标题**改成项目显示名；再点同一个项目会展开并聚焦已有标签，不新开。
+- **按会话**：终端属于当前会话，换会话就是另一组终端。
+- **上限**：默认每会话 8 只（已退出的终端也占配额），达到上限时面板提示先关闭不用的终端。
+- **刷新页面**：终端进程与标签由上游恢复；插件按 `contentId`（跨页面稳定的内容身份）记住「哪个项目对应哪只标签」，所以刷新后再点是聚焦而不是重复开。
+- **无会话页面不可用**：左栏「代码工作区」页和新建会话浮层没有会话，右侧栏终端无处归属，因此不显示按钮，只在项目列表下给一行说明。
+- **组合被裁剪时**：没有右侧栏或没有终端插件的组合，整个功能不出现，面板其余部分照常工作。
+
+这条快捷按钮**不经过宿主插件**：终端是浏览器 ↔ 宿主的既有通道，没有新增端点、没有 store 改动，也不向提示词或工具增加任何内容。⚠️ 内置终端以**系统用户权限**运行，不受 Agent 沙箱约束——见下面「权限模型」。
+
 ### `@` 文件菜单
 
 在输入框敲 `@`，除自带的工作区文件外，还会按每个 folder 显示一个分组。输入 `@` 时每个 folder 一行作为入口；输入 `@main` 在所有根里排名；输入 `@dsh-nl/src/` 或 `@D:/repo/src/` 逐层下钻。
@@ -231,6 +248,10 @@ DSH 沙箱（Windows ACL runner）为每个进程树只授予**一个**工作区
 - 读操作不受限，不需要 `workdir`。
 
 这条规则会写进系统提示词，所以 Agent 知道该怎么做。
+
+### 内置终端不受 Agent 沙箱约束
+
+「在 DSH 终端中打开」启动的是**用户终端**：它继承主机的系统用户权限，和 Agent 当前处于什么沙箱模式、什么审批策略无关。因此它可以在任何用户可写的目录里读写，包括附加根之外——这是 DSH 的既有设计（用户终端与 Agent 终端本就是两套权限），不是本插件绕过沙箱。插件只决定「在哪个目录开」，不改变终端权限；这条边界必须让用户看得见。
 
 ### 工作区文件由用户管理
 
@@ -259,7 +280,7 @@ DSH 里一个 Workspace 的身份就是它根目录 `realpath` 规范化后的�
 | 编辑器图标 | `lib/editor-icon.js` | 官方没有图标路由的家族成员，从可执行文件提取关联图标；产物校验不通过就当作没有 |
 | 文件对话框 | `lib/workspace-picker.js` | 用**主机自己的文件对话框**选 `.code-workspace`——宿主那个只认目录的选择器 seam 的文件版兄弟；三种结果（picked / cancelled / unavailable）、runner 可注入、任何测试都不会真弹对话框 |
 | 宿主 | `lib/index.js` | 发现与缓存、`tools/execute` 重根拦截、提示词注入、通知、`/code-workspace` 命令、无会话 `codeWorkspace/*` 远程 API、`@` 发现、编辑器与文件对话框端点 |
-| 客户端 | `lib/client.js` | 左栏入口与它打开的无会话中央面板、`conversation.view` 的页签本体、仅在降级组合里出现的会话头部按钮、新建会话页 dock 胶囊与它的浮层面板、「Open In…」接管、`@` 同伴分组 |
+| 客户端 | `lib/client.js` | 左栏入口与它打开的无会话中央面板、`conversation.view` 的页签本体、仅在降级组合里出现的会话头部按钮、新建会话页 dock 胶囊与它的浮层面板、「Open In…」接管、`@` 同伴分组、每个 folder 行的内置终端快捷按钮 |
 
 - **发现**：会话根为 `C` 时，当前文件依次是（1）**本会话**选过的文件；（2）`C` 最近的一条显式记录——若那条是墓碑则到此为止；（3）**自动采用**：`C` 下恰好一个 `.code-workspace`；（4）什么都没有，此时插件对该会话完全失效。两个及以上候选视为歧义（fail closed）。旧规则「记录里目录等于 `C` 的那个文件」已经删掉：一个目录里有多个文件时，它返回的是碰巧先被记录的那个。
 - **缓存**：模型 2s、目录发现 3s、`@` 索引 4s。刻意**不用 `fs.stat` 元数据**做失效判断——`FsInfo` 的字段不属于插件面向的契约，用不靠谱的字段做戳可能永远不变化，把根集合钉死整个会话。面板与命令的读取一律强制重读，所以每次这样的读取都会重算推导出的根；对话视图随页签被选中而挂载、用户离开而卸载，每次挂载读一次就正是「把当前状态给我看」，不再有客户端读窗口或节流。
@@ -267,6 +288,7 @@ DSH 里一个 Workspace 的身份就是它根目录 `realpath` 规范化后的�
 - **无会话通道**：`ctx.provide('codeWorkspace', api)` + 手写 `src-json` Typert 描述符，按**路径**而非 session id 取参，所以还没有会话的新建会话页也能读写工作区文件。`sessionId` 是可选附加参数（`acceptsUndefined: true`），出现在十一个答案可能取决于「哪个会话问的」的端点上——`state`、`open`、`forget`、`useFile`、`create`、`addFolder`、`removeFolder`、`renameFolder`、`moveFolder`、`openInEditor`、`listFiles`。不带它时答案就是「每个根的关联」，也正是新会话会继承的那一个。
 - **状态对象**：`rootDir`、`fileDir`、`file`、`title`、`roots[]`（每项带 `isPrimary`，只有与会话根相同的那一个为 true）、`extraRoots`、`conflict`（同样命名这个根的其它文件），外加 `warnings`、`error`、`indent`。
 - **打开编辑器**：`codeWorkspace/editors` 报告本机能证明的家族（懒解析一次并缓存，SSH 会话直接判空）；`codeWorkspace/openInEditor` 取会话根、解析出该根的工作区文件，然后以 `<编辑器> <文件>`（没有文件时退回 `<编辑器> <会话根目录>`）detached 启动。图标经 `codeWorkspace/editorIcon` 以 data URL 内联返回，因此本插件不需要自己的 HTTP 路由，也就不必再引入 `webServer` / `connection` 依赖。
+- **项目终端**：客户端在 `ctx.inject(['sidebarRight', 'webTerminals', 'sidebarRightTabs'])` 里**软挂**右侧栏与终端服务（缺任一即整个功能不出现），用 `sidebarRight.openTab('terminal')` 分配标签、从 `openTabs` 清单的增量里认领新标签（`openTab` 不返回标签 id），借 `webTerminals.view(sessionId, tabId, contentId)` 等到可写后写入 `cd` 并 `rename` 标签。`cd` 是必须的：上游创建接口没有 cwd，终端永远在会话根启动。项目 → `contentId` 的对应存在浏览器 `localStorage`（`dsh.code-workspace.project-shells.v1`，上限 64 条），不进宿主 store。
 - 配置/关联存储在 `<DSH_HOME>/storages/code-workspace/index.json`（在 Agent 沙箱之外，且被写保护）。store 形状是 `{ version: 2, files, roots: [{ root, file }], sessions: [{ session, file }] }`，都按最近优先排列，每个列表上限 200 条。v1 的 store 会保留它的 `files`、但不会凭空造出关联；第一次显式选择才会写下关联。
 
 ---
@@ -277,13 +299,13 @@ DSH 里一个 Workspace 的身份就是它根目录 `realpath` 规范化后的�
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-六个测试文件，共 177 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入）、可注入的对话框 runner（所以没有任何测试会真的弹出文件选择框），客户端用最小 React shim（hook 单次求值、递归展开函数组件），所以可以直接检查渲染树并模拟点击。
+六个测试文件，共 190 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入）、假的右侧栏与终端服务（标签清单、`openTab`、`view` 全部注入）、可注入的对话框 runner（所以没有任何测试会真的弹出文件选择框），客户端用最小 React shim（hook 单次求值、递归展开函数组件），所以可以直接检查渲染树并模拟点击。
 
 ```bash
 node test/jsonc.test.mjs              # 25 —— JSONC 解析与注释保留改写
 node test/workspace-file.test.mjs     # 24 —— VS Code 路径规则、folders 增删改、推导会话根
 node test/host.test.mjs               # 50 —— 发现、store、拦截重根、拒绝、命令、远程 API、@ 发现、编辑器守卫
-node test/client.test.mjs             # 46 —— bundle 契约、槽位注册、面板交互、重复根区块、Open In… 接管、@ 源
+node test/client.test.mjs             # 59 —— bundle 契约、槽位注册、面板交互、重复根区块、Open In… 接管、@ 源、项目终端快捷按钮
 node test/editor.test.mjs             # 22 —— 家族解析、先证明再启动、子进程环境、启动结果、图标
 node test/workspace-picker.test.mjs   # 10 —— 主机文件对话框的三种结果与可注入 runner
 ```
@@ -303,6 +325,8 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 ```
 
 本机 `0.2.0-rc.2` 实测 **30/30**：编辑器功能加入前的 25 项，加上随它新增的 5 项（bundle 里带上了接管、`codeWorkspace/editors` 答出家族、未知 id 必须撞上的两条拒绝）。脚本不会启动任何编辑器——它发的两次编辑器调用按构造都是拒绝。它的临时工作区文件里写的是 `{ "path": "." }`，所以插件从它推导出的根就是那个临时目录本身，`open registers the root the file derives as a DSH workspace` 这一条断言的就是这个根，而不是文件所在的目录。
+
+项目终端功能给脚本**新增了一条 bundle 标记检查**（共 31 项）：它要求实例服务的是带项目终端代码的**新** bundle。本仓库的 desktop profile 里装的仍是旧的 npm 包，所以这一条**尚未在桌面实例上实测**；客户端行为由 `test/client.test.mjs` 的假右侧栏/终端服务覆盖。
 
 这个脚本**不覆盖浏览器里画出来的面板**：它断言的是宿主端点和 bundle 标记，不是渲染出来的界面。对话视图的页面注册、入口切换、无布局服务时不动作与会话归属由 `test/client.test.mjs` 钉住；这一页在真实中央栏里画出来的样子**尚未在浏览器中实测**。左栏那一行与主机文件对话框同理：注册、决策与降级都由测试钉住，但**对话框本身还没有在真实桌面上弹过一次**。
 
@@ -326,6 +350,7 @@ node tools/verify-instance.mjs "http://127.0.0.1:<port>/?token=<token>"
 | `tools/probe-index.mjs` | 导出一个实例的索引，检查 bundle 注入 |
 | `docs/client-contract.md` | DSH 0.2.0-rc.2 客户端插件契约（逐条带行号出处） |
 | `docs/design.md` | 架构与不变量 |
+| `docs/design-project-shells.md` | 项目终端功能的设计与取舍记录（已实现，稳定结论已折叠进 `docs/design.md`） |
 
 ## 许可证
 

@@ -290,6 +290,8 @@ async function bootClient({ services = {}, requires = {}, dictionaries = [], val
     dictionaries: allDictionaries,
     effects,
     confirmations: fakeWindow.__confirmations,
+    /** The browser storage the bundle may read and write, shared with the test. */
+    localStorage: fakeWindow.localStorage,
     /** Find a registered slot registration by slot key. */
     slot(key) {
       const found = slots.find((entry) => entry.spec.name === key)
@@ -425,7 +427,7 @@ async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionari
   const overlay = harness.slot('shell.overlay')
   const view = harness.slots.find((entry) => entry.spec.name === 'conversation.view')
   const panel = harness.slots.find((entry) => entry.spec.name === 'main')
-  return { harness, rpcLog, commandLog, header, dock, overlay, view, panel, layout: face, confirmations: harness.confirmations }
+  return { harness, rpcLog, commandLog, header, dock, overlay, view, panel, layout: face, confirmations: harness.confirmations, localStorage: harness.localStorage }
 }
 
 /** Props the standard kit would inject for a session-scoped entry. */
@@ -1515,3 +1517,329 @@ test('a failed shipped launch leaves the control in its error state instead of c
   }
 })
 
+
+// ------------------------------------------- project terminals (folder rows)
+
+/** The folder row of one root: the deepest div holding its path and one terminal button. */
+function rowByPath(tree, rootPath) {
+  const rows = nodesWhere(tree, (node) => {
+    if (node.type !== 'div') return false
+    if (!textOf(node).includes(rootPath)) return false
+    return buttonsIn(node).some((button) => textOf(button) === '>_')
+  })
+  return rows.filter((row) => buttonsIn(row).filter((button) => textOf(button) === '>_').length === 1).pop()
+}
+
+function terminalButton(row) {
+  assert.ok(row, 'the folder row must render')
+  const button = buttonsIn(row).find((entry) => textOf(entry) === '>_')
+  assert.ok(button, 'the folder row must offer a terminal shortcut')
+  return button
+}
+
+/** One fake terminal tab, in the shape the sidebar inventory reports. */
+let terminalTabSerial = 0
+function terminalTab(overrides = {}) {
+  terminalTabSerial += 1
+  return Object.assign(
+    { sessionId: 'session-1', tabId: 'tab-' + terminalTabSerial, kind: 'terminal', contentId: 'content-' + terminalTabSerial },
+    overrides,
+  )
+}
+
+/**
+ * The services `sidebarRight` / `webTerminals` / `sidebarRightTabs` publish.
+ *
+ * Defaults to a writable PowerShell view, so the happy path settles inside the
+ * click; individual tests override the shell, the view state or the tab that
+ * `openTab` allocates.
+ */
+function terminalStub(options = {}) {
+  const calls = { openTab: [], focus: [], close: [], write: [], rename: [], view: [] }
+  const listeners = []
+  let expanded = options.expanded === true
+  let tabs = (options.tabs || []).slice()
+  const views = new Map()
+  const shellPath = options.shellPath || 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+  const viewState = options.viewState || {}
+  const publish = () => {
+    for (const listener of listeners.slice()) listener()
+  }
+  const services = {
+    sidebarRight: {
+      openTab(kind, opts) {
+        calls.openTab.push({ kind, opts })
+        const tab = options.tabFor ? options.tabFor(calls) : terminalTab()
+        tabs = tabs.concat([tab])
+        publish()
+      },
+      focus(tabId) {
+        calls.focus.push(tabId)
+      },
+      isExpanded() {
+        return expanded
+      },
+      toggleExpanded() {
+        expanded = !expanded
+        calls.toggleExpanded = (calls.toggleExpanded || 0) + 1
+      },
+      close(tabId) {
+        calls.close.push(tabId)
+        tabs = tabs.filter((tab) => tab.tabId !== tabId)
+        publish()
+      },
+      openTabs: {
+        getSnapshot: () => tabs,
+        subscribe(listener) {
+          listeners.push(listener)
+          return () => {
+            const index = listeners.indexOf(listener)
+            if (index >= 0) listeners.splice(index, 1)
+          }
+        },
+      },
+    },
+    webTerminals: {
+      view(sessionId, key, contentId) {
+        calls.view.push({ sessionId, key, contentId })
+        if (!views.has(key)) {
+          const stateListeners = []
+          const state = Object.assign(
+            { phase: 'connected', writable: true, info: { state: 'running', shell: { path: shellPath } } },
+            viewState,
+          )
+          views.set(key, {
+            state: {
+              getSnapshot: () => state,
+              subscribe(listener) {
+                stateListeners.push(listener)
+                return () => {
+                  const index = stateListeners.indexOf(listener)
+                  if (index >= 0) stateListeners.splice(index, 1)
+                }
+              },
+            },
+            write(data) {
+              calls.write.push(data)
+            },
+            rename(title) {
+              calls.rename.push(title)
+              return Promise.resolve()
+            },
+          })
+        }
+        return views.get(key)
+      },
+    },
+    sidebarRightTabs: {
+      get(kind) {
+        return kind === 'terminal' ? { kind, multiple: true } : undefined
+      },
+      subscribe() {
+        return () => {}
+      },
+    },
+  }
+  return {
+    services,
+    calls,
+    tabs: () => tabs,
+    removeTab(tabId) {
+      tabs = tabs.filter((tab) => tab.tabId !== tabId)
+      publish()
+    },
+  }
+}
+
+test('the folder rows offer a DSH terminal shortcut only when the terminal services exist', async () => {
+  const terminals = terminalStub()
+  const wired = await boot({ services: terminals.services })
+  expand(wired.view.component(kit()))
+  await flush()
+  const tree = expand(wired.view.component(kit()))
+  assert.equal(buttonsIn(tree).filter((button) => textOf(button) === '>_').length, 2, 'one shortcut per folder')
+  assert.ok(rowByPath(tree, 'D:/ws'), 'the primary folder row')
+  assert.ok(rowByPath(tree, 'D:/other'), 'the additional folder row')
+
+  const plain = await boot()
+  expand(plain.view.component(kit()))
+  await flush()
+  const bare = expand(plain.view.component(kit()))
+  assert.equal(buttonsIn(bare).filter((button) => textOf(button) === '>_').length, 0, 'no terminal services, no shortcut')
+  assert.doesNotMatch(textOf(bare), /内置终端按会话提供/, 'the hint also belongs to the terminal services')
+})
+
+test('the primary folder opens a terminal without a cd and titles it after the project', async () => {
+  const terminals = terminalStub()
+  const { view } = await boot({ services: terminals.services })
+  expand(view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(view.component(kit())), 'D:/ws')).props.onClick()
+  await flush()
+  assert.equal(terminals.calls.openTab.length, 1)
+  assert.equal(terminals.calls.openTab[0].kind, 'terminal')
+  assert.equal(terminals.calls.openTab[0].opts, undefined, 'the remembered shell is the default, so no params are sent')
+  assert.deepEqual(terminals.calls.write, [], 'the primary root already IS the session cwd')
+  assert.deepEqual(terminals.calls.rename, ['ws'])
+  assert.equal(terminals.calls.view.length, 1)
+  assert.equal(terminals.calls.view[0].sessionId, 'session-1')
+  assert.match(textOf(expand(view.component(kit()))), /已在 DSH 终端中打开「ws」/)
+})
+
+test('an additional root is entered with a shell-aware cd', async () => {
+  const odd = { index: 1, path: "..//it's", name: 'Odd', label: 'Odd', resolvedPath: "D:/other/it's", exists: true, isPrimary: false, relative: "..//it's" }
+  const state = Object.assign({}, STATE, { roots: [STATE.roots[0], odd], extraRoots: [odd.resolvedPath] })
+  const terminals = terminalStub()
+  const { view } = await boot({ services: terminals.services, onCommand: () => commandOk(state) })
+  expand(view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(view.component(kit())), "D:/other/it's")).props.onClick()
+  await flush()
+  assert.deepEqual(terminals.calls.write, ["Set-Location -LiteralPath 'D:/other/it''s'\r"])
+  assert.deepEqual(terminals.calls.rename, ['Odd'])
+  assert.match(textOf(expand(view.component(kit()))), /已在 DSH 终端中打开「Odd」/)
+})
+
+test('cmd and MSYS/POSIX shells get their own cd spelling', async () => {
+  const odd = { index: 1, path: '../dir', name: 'Dir', label: 'Dir', resolvedPath: 'D:/a b', exists: true, isPrimary: false, relative: '../dir' }
+  const state = Object.assign({}, STATE, { roots: [STATE.roots[0], odd], extraRoots: [odd.resolvedPath] })
+  const cases = [
+    { shellPath: 'C:/Windows/System32/cmd.exe', expected: 'cd /d "D:/a b"\r' },
+    { shellPath: 'C:/Program Files/Git/bin/bash.exe', expected: "cd '/d/a b'\r" },
+  ]
+  for (const entry of cases) {
+    const terminals = terminalStub({ shellPath: entry.shellPath })
+    const { view } = await boot({ services: terminals.services, onCommand: () => commandOk(state) })
+    expand(view.component(kit()))
+    await flush()
+    terminalButton(rowByPath(expand(view.component(kit())), 'D:/a b')).props.onClick()
+    await flush()
+    assert.deepEqual(terminals.calls.write, [entry.expected], entry.shellPath)
+  }
+
+  const posix = { index: 1, path: '../home', name: 'Home', label: 'Home', resolvedPath: "/home/it's", exists: true, isPrimary: false, relative: '../home' }
+  const posixState = Object.assign({}, STATE, { rootDir: '/ws', roots: [Object.assign({}, STATE.roots[0], { resolvedPath: '/ws' }), posix], extraRoots: [posix.resolvedPath] })
+  const terminals = terminalStub({ shellPath: '/bin/bash' })
+  const booted = await boot({ services: terminals.services, onCommand: () => commandOk(posixState) })
+  expand(booted.view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(booted.view.component(kit())), "/home/it's")).props.onClick()
+  await flush()
+  assert.deepEqual(terminals.calls.write, ["cd '/home/it'\\''s'\r"])
+})
+
+test('a second click focuses the project terminal instead of allocating another', async () => {
+  const terminals = terminalStub()
+  const { view } = await boot({ services: terminals.services })
+  const clickOther = () => terminalButton(rowByPath(expand(view.component(kit())), 'D:/other')).props.onClick()
+  expand(view.component(kit()))
+  await flush()
+  clickOther()
+  await flush()
+  assert.equal(terminals.calls.openTab.length, 1)
+  const tabId = terminals.tabs()[0].tabId
+  clickOther()
+  await flush()
+  assert.equal(terminals.calls.openTab.length, 1, 'the remembered terminal is reused')
+  assert.deepEqual(terminals.calls.focus, [tabId])
+  assert.match(textOf(expand(view.component(kit()))), /已切换到「Other」的终端/)
+})
+
+test('a closed project terminal is allocated again on the next click', async () => {
+  const terminals = terminalStub()
+  const { view } = await boot({ services: terminals.services })
+  const clickOther = () => terminalButton(rowByPath(expand(view.component(kit())), 'D:/other')).props.onClick()
+  expand(view.component(kit()))
+  await flush()
+  clickOther()
+  await flush()
+  terminals.removeTab(terminals.tabs()[0].tabId)
+  clickOther()
+  await flush()
+  assert.equal(terminals.calls.openTab.length, 2, 'the stale binding is dropped, not reused')
+})
+
+test('a page reload focuses the restored terminal instead of opening a new one', async () => {
+  const restored = { sessionId: 'session-1', tabId: 'tab-restored', kind: 'terminal', contentId: 'content-restored' }
+  const terminals = terminalStub({ tabs: [restored] })
+  const booted = await boot({ services: terminals.services })
+  booted.localStorage.setItem(
+    'dsh.code-workspace.project-shells.v1',
+    JSON.stringify({ version: 1, entries: [{ sessionId: 'session-1', path: 'd:/other', contentId: 'content-restored', at: 1 }] }),
+  )
+  expand(booted.view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(booted.view.component(kit())), 'D:/other')).props.onClick()
+  await flush()
+  assert.equal(terminals.calls.openTab.length, 0)
+  assert.deepEqual(terminals.calls.focus, ['tab-restored'], 'the restored tab id is read back from the inventory')
+})
+
+test('the terminal limit is reported on the panel instead of swallowed', async () => {
+  const terminals = terminalStub({ viewState: { phase: 'creating', writable: false, issue: 'terminalLimit' } })
+  const { view } = await boot({ services: terminals.services })
+  expand(view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(view.component(kit())), 'D:/ws')).props.onClick()
+  await flush()
+  assert.match(textOf(expand(view.component(kit()))), /终端数量已达上限/)
+})
+
+test('a terminal that fails to start explains itself', async () => {
+  const terminals = terminalStub({ viewState: { phase: 'failed', writable: false, error: 'no shell on this host' } })
+  const { view } = await boot({ services: terminals.services })
+  expand(view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(view.component(kit())), 'D:/ws')).props.onClick()
+  await flush()
+  assert.match(textOf(expand(view.component(kit()))), /终端打开失败：no shell on this host/)
+})
+
+test('a tab that landed in another session is closed instead of typed into', async () => {
+  const terminals = terminalStub({
+    tabFor: () => ({ sessionId: 'session-2', tabId: 'tab-foreign', kind: 'terminal', contentId: 'content-foreign' }),
+  })
+  const { view } = await boot({ services: terminals.services })
+  expand(view.component(kit()))
+  await flush()
+  terminalButton(rowByPath(expand(view.component(kit())), 'D:/other')).props.onClick()
+  await flush()
+  assert.equal(terminals.calls.openTab.length, 1)
+  assert.deepEqual(terminals.calls.close, ['tab-foreign'], 'the foreign tab is closed, never used')
+  assert.deepEqual(terminals.calls.write, [], 'no path is typed into a foreign session')
+  assert.match(textOf(expand(view.component(kit()))), /终端打开失败/)
+})
+
+test('a missing folder disables its terminal shortcut instead of opening it', async () => {
+  const gone = { index: 1, path: '../gone', name: 'Gone', label: 'Gone', resolvedPath: 'D:/gone', exists: false, isPrimary: false, relative: '../gone' }
+  const state = Object.assign({}, STATE, { roots: [STATE.roots[0], gone], extraRoots: [gone.resolvedPath], warnings: ['D:/gone is missing'] })
+  const terminals = terminalStub()
+  const { view } = await boot({ services: terminals.services, onCommand: () => commandOk(state) })
+  expand(view.component(kit()))
+  await flush()
+  const button = terminalButton(rowByPath(expand(view.component(kit())), 'D:/gone'))
+  assert.equal(button.props.disabled, true)
+  assert.match(String(button.props.title), /目录不存在/)
+  assert.equal(button.props.onClick, undefined, 'a disabled Button wires no click handler at all')
+  assert.equal(terminals.calls.openTab.length, 0)
+})
+
+test('the sessionless panel explains where the terminal shortcut lives', async () => {
+  const terminals = terminalStub()
+  const { dock, panel } = await boot({
+    services: terminals.services,
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/open') return ok(STATE)
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(STATE)
+    },
+  })
+  expand(dock.component(kit())).children[0].props.onClick()
+  await flush()
+  expand(panel.component({}))
+  await flush()
+  const tree = expand(panel.component({}))
+  assert.match(textOf(tree), /内置终端按会话提供/)
+  assert.equal(buttonsIn(tree).filter((button) => textOf(button) === '>_').length, 0)
+})

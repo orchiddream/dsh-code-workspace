@@ -79,6 +79,12 @@ if (scriptTag) {
     code.includes('conversation.session.header.utilities') && code.includes('sidebar.right.tab.files.actions') && code.includes('open-in-app') && code.includes('MENU_PRIORITY'),
     'the priority VALUE is pinned by test/client.test.mjs; this only proves the takeover shipped',
   )
+  const terminalShortcut = code.includes('dsh.code-workspace.project-shells.v1') && code.includes('webTerminals') && code.includes("openTab('terminal')")
+  record(
+    'the served bundle carries the project terminal shortcut',
+    terminalShortcut,
+    'the shortcut lives on each folder row; its cd spelling and reuse behaviour are pinned by test/client.test.mjs',
+  )
 } else {
   record('the index exposes a fetchable client bundle url', false, 'no script src matched')
 }

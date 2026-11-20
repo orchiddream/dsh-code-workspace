@@ -654,6 +654,50 @@ cached for the plugin's life.
 - A family id the client names that this host cannot prove is refused; the client
   can never hand the host an arbitrary executable path.
 
+## Project shells
+
+Each folder row carries a `>_` shortcut that hands the folder to DSH's own
+right-sidebar terminal. The terminal subsystem already owns PTY lifetime, screen
+recovery, the per-session quota and process permissions, so this plugin adds only
+two things: the entry point and the directory.
+
+The upstream terminal-create request has no `cwd` field — the host always starts
+the shell in the Session workspace. An additional root can therefore only be
+reached by typing a `cd` into the PTY once it becomes writable; that line stays
+visible on screen. The alternatives — pretending the shell is rooted somewhere it
+is not, or smuggling a wrapper executable through `shellPath` (which is verified
+against shell discovery) — are either a lie or unsupported, so the command is
+typed and the README says so.
+
+Everything else is client-only:
+
+- The right Sidebar and terminal services are **soft-injected**
+  (`sidebarRight`, `webTerminals`, `sidebarRightTabs`); any one missing, or the
+  `terminal` kind unregistered, and the shortcut never renders — the rest of the
+  panel keeps working. Nothing is added to `dsh.client.inject`: that prerequisite
+  list is hard, and a trimmed composition must lose the feature, not the plugin.
+- `openTab` returns no tab id, and the `terminal` kind is `multiple: true`, so the
+  new tab is claimed from the `openTabs` inventory delta. Its view is then
+  borrowed by `(sessionId, tabId)` and awaited until writable — `TerminalView.write`
+  drops input before that point (the tab body creates and attaches the view).
+- The project → `contentId` binding is persisted in browser `localStorage`
+  (`dsh.code-workspace.project-shells.v1`, capped at 64 entries): content ids
+  survive a page reload while layout tab ids do not, so a click after reload
+  focuses the restored tab instead of duplicating it. The binding is scoped by
+  session, and a tab that lands in another session is closed rather than typed
+  into. A tab whose process has exited is focused as it is — the screen shows the
+  exit code, and closing it then clicking again allocates a new shell.
+- An additional root gets the shell's own `cd` spelling — `Set-Location
+  -LiteralPath` for PowerShell, `cd /d` for cmd, POSIX `cd` otherwise (a Windows
+  drive path is converted to the MSYS form). The primary root skips it, because
+  the session cwd already is that folder.
+- The shortcut is absent on the sessionless surfaces (the left-column page and the
+  creation popover): the right Sidebar's terminal attaches to the on-screen
+  Session, and those surfaces have none. One hint line says where it lives.
+
+The terminal runs with the host's **system-user permissions**, independently of
+the Agent sandbox: the plugin decides the directory, never the terminal's rights.
+
 ## `@` discovery
 DSH's `@` provider builds exactly one searcher from the session cwd and refuses every
 candidate outside it, so an additional root is unreachable through it. The plugin does
@@ -741,6 +785,13 @@ one `dsh-multi-folder` carries for its config file.
   depends on the shipped locale namespace for its names: an application id that
   namespace does not name stays out of the list, exactly as the shipped control
   drops it.
+- **Project terminals are bounded by upstream.** The shell always starts in the
+  Session workspace and an additional root is entered with a visible `cd`; the shell
+  is per session (no cross-session terminal), the default quota is 8 per session
+  (exited shells included), the sessionless pages cannot host one, and the terminal
+  runs with the system user's permissions rather than the Agent's sandbox. The
+  feature also depends on the right Sidebar and terminal services; a composition
+  without them hides the shortcut instead of degrading it.
 - **No editor is configurable.** An exotic install that registers neither an
   `App Paths` entry nor an uninstall record, and that lies outside the conventional
   directories, will not be listed. Widening that means a config field (the previous
@@ -755,14 +806,16 @@ one `dsh-multi-folder` carries for its config file.
 ## Tests
 
 `test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (24), `test/host.test.mjs`
-(50), `test/client.test.mjs` (46), `test/editor.test.mjs` (22) and
-`test/workspace-picker.test.mjs` (10) — 177 cases — run with no DSH
+(50), `test/client.test.mjs` (59), `test/editor.test.mjs` (22) and
+`test/workspace-picker.test.mjs` (10) — 190 cases — run with no DSH
 runtime. The host tests use a fake `fs` seam, `systemPrompt`, `commands` registry and
 `shell`/`jobs`; the editor tests inject the platform, environment, registry reader,
 `PATH` lookup and file probe, and hand `launchEditor` a child-process double, so a test
 run never starts an editor. The client test uses a minimal React shim whose hooks
 resolve once per call, which turns every component into a plain function whose element
-tree can be inspected and whose buttons can be clicked.
+tree can be inspected and whose buttons can be clicked; its project-terminal cases
+inject fake `sidebarRight` / `webTerminals` / `sidebarRightTabs` services (tab
+inventory, `openTab`, `view`), so no real terminal is allocated either.
 
 The new behaviour is pinned where it can be exercised without a DSH runtime: the
 derived root and its fallbacks (`workspace-file.test.mjs`), the four-step resolution,

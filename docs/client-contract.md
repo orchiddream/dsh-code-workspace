@@ -629,6 +629,35 @@ useSession, sessionId, useProjection, useTrajectory
 
 hook 名的生成规则是 `use` + 首字母大写（`standardHookPropName`，`asar:.../dsh-client-ui-slots/lib/index.js:7-9`）。`root` scope 只有 6 项（§3.5b）。
 
+### 7.10 `webTerminals`（右侧栏内置终端）
+
+这是本仓库在 rc.2 上**补充发现**的服务：它不在 §7.6 提到的 `SERVICE_API` 八项目录里，因此必须像 `inputTriggers` 一样先做能力判断、用软注入等它出现。
+
+```js
+// @deepseek-ai/dsh-api-terminal-controller/lib/client.js:695
+super(ctx, "webTerminals")
+```
+
+| 成员 | 形状 | 证据 |
+| --- | --- | --- |
+| `webTerminals.view(sessionId, key, contentId, terminalId?, shellPath?)` | 返回该 `(sessionId, key)` 的**唯一** `TerminalView`（正文与标题共用同一实例）；`terminalId` 省略 = 新标签可自行创建，给出 = 只恢复既有终端 | `:722-735`；调用方 `.../dsh-client-ui-sidebar-terminal/lib/client.js:375-384` |
+| `TerminalView.state` | `SnapshotStore<TerminalViewState>`：`phase`、`environment`、`info`、`writable`、`error`、`issue`（含 `terminalLimit`） | `.../lib/types/client/model.d.ts:24-34` |
+| `TerminalView.write(data)` | **只在 `writable === true` 且持有输入附件时**发送；否则直接 return（不排队） | `:271-291` |
+| `TerminalView.rename(title)` | 写入显示名；标签标题组件读 `state.info.title` | `:316-322`；`.../dsh-client-ui-sidebar-terminal/lib/client.js:224-226` |
+| `TerminalView.mount()` / `refresh()` | 正文挂载才创建/接管进程；`refresh` 在同一 `(sessionId, key)` 上合并重复调用 | `:140-210` |
+
+终端标签类型由 `@deepseek-ai/dsh-client-ui-sidebar-terminal` 注册：`kind: 'terminal'`、`multiple: true`（每次 `openTab` 都是新标签，`contentId` 是随机 UUID），正文与标题分别在 `sidebar.right.pane.tab` / `sidebar.right.pane.tab.title` 以该类型 `id` 为 key 注册（`:438-451`、`:475-489`）。因此「打开一个终端并拿到它的标签」必须两段式：
+
+1. `sidebarRight.openTab('terminal')`（§7.8）——不返回标签 id，也不接受自定义 contentId；
+2. 从 `sidebarRight.openTabs` 的增量里认领 `{ sessionId, tabId, kind: 'terminal', contentId }`（`.../lib/types/client/tab-inventory.d.ts:6-11`），再用 `webTerminals.view(sessionId, tabId, contentId)` 借到同一个模型。
+
+两个上游硬约束决定了能力边界：
+
+- **创建接口没有 cwd**：`TerminalCreateRequest` 只有 `shellPath` / `id` / `cols` / `rows`（`.../lib/types/types.d.ts:53-60`），宿主用 `environment.cwd` 启动进程（`.../lib/index.js:1001-1011`），而它是 Session 的 workspace（`:783`）；`shellPath` 还必须是 `shells()` 发现出来的路径（`:999`），塞不进包装脚本。想在别的目录起 shell，只能在终端可写后向 PTY 输入 `cd`——本插件的项目终端就是这么做的，并把这条命令留在屏幕上。
+- **`write` 不排队**：必须等到 `state.writable === true`（`:271-291`），否则输入被静默丢弃。
+
+恢复与配额：`contentId` 是跨页面稳定的内容身份（客户端在 `dsh.terminal.binding.v1.*` 里保存关联），tab id 只是本次页面生命的本地 id（`.../dsh-api-terminal-controller/README.md:58`），所以「项目 → 终端」的持久映射必须存 `contentId`。终端按会话隔离，默认每会话 `maxTerminals: 8`，已退出终端也占配额（同 README `:36`、`:89`）。用户终端以系统用户权限运行，独立于 Agent 沙箱（`:30`）；插件只决定目录，不改变权限。
+
 ---
 
 ## 8. 样式
