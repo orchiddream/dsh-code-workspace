@@ -179,9 +179,9 @@ The session header button exists **only in the degraded composition** where the 
 The detail body shows the workspace file path, the **workspace root** it derives, the file's own directory when it differs from that root, every folder (display name, real path, primary/missing badges) and, when the root is named by more than one file, an "other workspace files naming the same root" block with one clickable row per file. It offers:
 
 - **A folder row** — display name, real path, primary/missing badges, and a `>_` terminal shortcut. Expanding it shows that folder's files; move up / down, rename, show in file manager and remove live in the row's context menu (right-click, or the `⋯` button)
-- **Add folder** — a relative or absolute path plus an optional display name; a missing or non-directory path is refused. Collapsed to a single `＋` row
+- **Add folder** — `＋ 新增文件夹` at the right end of the folder section's header: it opens a path field and an optional display name between that header and the rows. A missing or non-directory path is refused
 - **Open in editor** — one button per VS Code-family editor found on the host, in the card's title row (see below)
-- **Switch file** / **Recent** / **New workspace file** / **Unlink**
+- **Switch file** / **Recent** / **New workspace file** / **Unlink** — the three pickers open directly under the action row that opened them (at the foot of the page they sat below the fold, which read as buttons that do nothing), and **New workspace file** asks for a name in an inline field instead of a browser prompt: the Desktop renderer has no `prompt()`, so the old code threw there and the button was inert
 
 **A session with no `.code-workspace` file still gets the tree.** The file decides how many roots there are, not whether the code can be read: a session rooted at one directory is a one-folder workspace, so that directory is the tree's single top-level row — expand it, click a file, and the preview opens in the right column. The row is **read-only**: its `⋯` menu keeps "show in file manager" (and the terminal shortcut when a session exists), but move / rename / remove, the drag handle and "add folder" are absent — every one of those writes the workspace file, and there is none.
 
@@ -239,6 +239,8 @@ The right Sidebar's file preview opens code files in a **read-only Monaco editor
 
 Every workspace folder is a row in the workspace card's own explorer, and it expands in place to that folder's files — including the additional folders the shipped single-root Files page can never list. Clicking a file opens it in that same preview; a path outside the session root travels as an absolute `dsh-resource://file/session/…` address, which the Host reads because file reads are not workspace-contained.
 
+The tree itself: files carry the platform's `FileTypeIcon` (the same filename/extension mapping the shipped Files panel uses, so `.ts`, `.json`, `.md`, `.java`, `.xml` and images each read at a glance; a composition without the UI primitives falls back to a plain sheet) while directories keep the shared folder glyph, and every level shares the folder row's caret / glyph / name columns one 16 px step in, with a guide line per ancestor. A `⤴` on a folder row — and, revealed on hover, on any tree row — **quotes that path into the conversation's draft** as the same `@path` reference an Explorer drop produces; a drag that starts inside a page cannot carry a file, so the page writes the reference instead. Opening a preview is a reading state: the card folds its paths, actions and pickers away and keeps the title row and the folder tree, and the chevron at the left of the title row brings them back.
+
 It is a document-preview renderer registered at `priority: 'extension'`, so it wins over the shipped `code` renderer for the same file suffixes while that renderer stays registered underneath — disabling this plugin brings the old preview straight back, and the per-file viewer menu still lists both.
 
 How it is delivered:
@@ -276,7 +278,7 @@ This was a real bug on `0.2.2-rc.5`, and it explains the old red line `终端打
 
 Typing `@` adds one group per folder beside the built-in workspace group. An empty query lists the folders as entry points, `@main` ranks across every root, and `@dsh-nl/src/` or `@D:/repo/src/` descends a level.
 
-A pick inserts an **absolute-path** mention (`@D:/repo/src/main.ts`), because an additional root lies outside the session root and no relative path can reach it. This is a **companion group** — the built-in menu is not modified.
+A pick inserts an **absolute-path** mention (`@D:/repo/src/main.ts`), because an additional root lies outside the session root and no relative path can reach it. This is a **companion group** — the built-in menu is not modified. The tree writes the same form: `⤴` on a folder or tree row puts that absolute `@path` into the draft, which is also what dragging the file in from Explorer produces on the desktop.
 
 ---
 
@@ -325,7 +327,7 @@ A Workspace's identity in DSH is its root directory's `realpath`-canonicalised p
 | Editor icon | `lib/editor-icon.js` | One executable's associated icon for the family entries no shipped route serves; verified payload or nothing |
 | File dialog | `lib/workspace-picker.js` | The host's own file dialog for a `.code-workspace` file — the file-shaped sibling of the shipped directory-only picker; three outcomes (picked / cancelled / unavailable), injectable runner, no dialog in any test |
 | Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor and file-dialog endpoints |
-| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation row chip (`conversation.hero.options`) and its popover, the "Open In…" takeover, `@` companion group, the per-folder built-in terminal shortcut, and the "⤴ Quote in chat" affordance on folder and tree rows (writes `@path` into the draft) |
+| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation row chip (`conversation.hero.options`) and its popover, the "Open In…" takeover, `@` companion group, the per-folder built-in terminal shortcut, the "⤴ Quote in chat" affordance on folder and tree rows (writes `@path` into the draft), and the fold-on-preview that gives the tree the height back |
 
 - **Discovery**: for a session rooted at `C`, the active file is (1) the file THIS SESSION picked, (2) `C`'s most recent explicit record — a tombstone there stops the search — (3) **adoption**: `C` holding exactly one `.code-workspace` file, (4) nothing, which makes the plugin inert for that session. Two or more candidates is a fail-closed tie. The old rule — "the recorded file whose *directory* is `C`" — is gone: with several files in one folder it returned whichever happened to be recorded first.
 - **Caching**: model 2 s, discovery 3 s, `@` index 4 s. `fs.stat` metadata is deliberately **not** used for invalidation — the fields an `FsInfo` carries are not part of the plugin-facing contract, so a stamp built from them could silently never change and pin a stale root set for a whole session. Panel and command reads always force a fresh parse, so the derived root is recomputed on every such read.
@@ -343,15 +345,17 @@ A Workspace's identity in DSH is its root directory's `realpath`-canonicalised p
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-Six files, 200 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), fakes for the right Sidebar and terminal services (the tab inventory, `openTab` and `view` all injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
+Eight files, 220 cases, **no DSH runtime required**: a fake `fs` seam, a fake `systemPrompt`, a fake `commands` registry, fake `shell`/`jobs`, a fake host for the editor family (registry, `PATH` and file set injected), fakes for the right Sidebar and terminal services (the tab inventory, `openTab` and `view` all injected), an injected dialog runner (so no test can open a real file picker), and a minimal React shim on the client side (hooks resolve once per call and function components are expanded recursively), so the rendered tree can be inspected and clicks simulated directly.
 
 ```bash
 node test/jsonc.test.mjs              # 25 — JSONC parsing and comment-preserving rewrites
 node test/workspace-file.test.mjs     # 24 — VS Code path rules, folders CRUD, the derived root
 node test/host.test.mjs               # 50 — discovery, the store, re-rooting, refusals, command, remote API, @ discovery, editor guards
-node test/client.test.mjs             # 67 — bundle contract, slot registrations, panel interaction and the redesigned page/components, the duplicate-root block, the Open In… takeover, the @ source, the project-terminal shortcut and its tab claim
+node test/client.test.mjs             # 78 — bundle contract, slot registrations, panel interaction and the redesigned page/components, the duplicate-root block, the Open In… takeover, the @ source, the project-terminal shortcut and its tab claim, quote-to-draft, the fold, the in-header add control and the file-type glyph
 node test/editor.test.mjs             # 22 — family resolution, proof-before-launch, child environment, launch outcomes, icons
 node test/workspace-picker.test.mjs   # 10 — the host file dialog's three outcomes, its injected runner
+node test/tree.test.mjs               # 6 — the directory listing behind the tree: absolute forward-slashed children, directories first, the cap, a non-absolute target refused
+node test/monaco-assets.test.mjs      # 5 — the vendored asset route: allowlist, traversal refusal, media types, and the four shipped files actually present
 ```
 
 Nothing in the editor tests launches an editor: the resolver's registry, `PATH` and file probes are injected, and `launchEditor` is handed a child-process double.
@@ -400,6 +404,7 @@ It follows pnpm-style `link` entries; `app.asar.unpacked` files are reported but
 | `lib/editor.js` | VS Code-family discovery, child environment, launch |
 | `lib/editor-icon.js` | Executable icon extraction for the family entries without a shipped icon route |
 | `lib/workspace-picker.js` | The host's own file dialog for a `.code-workspace` file, as the file-shaped sibling of the shipped directory-only picker |
+| `lib/vendor/monaco/` | The read-only viewer's prebuilt Monaco (`0.52.2`) plus the `LICENSE` and `ThirdPartyNotices.txt` its MIT redistribution requires |
 | `cordis.patch.yml` | Profile patch layer inserting the `dsh-code-workspace` row |
 | `test/` | Behaviour tests, no DSH runtime |
 | `tools/profile-link.mjs` | Link / unlink the plugin into a DSH profile without pnpm; `--package` retires a superseded one |
