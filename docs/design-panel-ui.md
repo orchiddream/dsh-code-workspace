@@ -582,9 +582,46 @@ display flex, alignItems center, gap 2, flex:'none'
   `marginRight:6`，否则 gap 会把每个引导格挤出自己的列。
 - 文件夹展开体 `paddingLeft:22`（+ 行内 6 = 28）：树从文件夹的列往右走一级，而不是反过来挂到左边——
   旧实现按 `depth` 单独算缩进，子项起点反而在父行左侧。
-- 树行留 16px 图标位：目录 `FolderGlyph`、文件 `FileGlyph`；文件 12.5/22 `TOKEN.labelDim`，
-  目录同字号但 `fontWeight:500`、`TOKEN.label`。
+- 树行留 16px 图标位：目录 `FolderGlyph`、文件走平台的 `FileTypeIcon`（`@deepseek-ai/dsh-client-ui-primitives`，
+  按完整文件名 → 前缀/后缀 → 扩展名分类，出彩色技术图形）；primitives 缺席的组合退回本包的 `FileGlyph`，
+  不会把图标列留空。「最近使用」的行用同一个 helper。
+- 文件的字号与颜色：12.5/22 `TOKEN.labelDim`；目录同字号但 `fontWeight:500`、`TOKEN.label`。
 - 加载 / 空 / 截断提示落在它所替代那一级的名称列：根级 `paddingLeft:62`，嵌套 `78 + depth*16`。
+
+#### 4.6.6 引用到对话（`⤴`）
+
+页面**不做**拖拽到对话：页面内拖拽只携带字符串，而 composer 的投递入口只认 `Files`，拖过去会被忽略；
+真正拖文件/文件夹进对话是桌面版的系统级拖放（`__DSH_HOST_PATHS__` 路径桥 → `@path` 引用）。这一页给的是
+语义等价的入口：
+
+- 出现条件：该 surface 拿到了 composer 的 `inputActions` 且**有会话**（`snapshot.sessionId`）。新建会话页的
+  浮层没有会话，因此不出现——不是渲染了不能用。
+- 文件夹行：动作组里常驻 `⤴`（`IconButton`，`title = action.quote`）。
+- 树行：行右侧 `⤴`，**hover 才出现**（`opacity:0→1`，`pointerEvents` 同步为 `none`，否则不可见的命中区
+  会吃掉本该给行的点击）。它在行按钮内部，所以是 `span[role=button]` + `stopPropagation`，与 caret 同一做法。
+- 点击：`captureInsertion()` 取当前选区 → `formatMention(path, 'file')`（目录先补尾斜杠，得到闭合引号）→
+  按草稿在 caret 前是否已有空白决定前置空格 → `insertText(mention + ' ', span)`。
+- 失败：选区取不到或修订已过期（正在发送）时给 `notice.quoteBusy`；路径含控制字符/引号时给
+  `notice.quoteUnsupported`。
+
+#### 4.6.7 动作行打开的分区（切换文件 / 最近使用 / 新建工作区文件）
+
+- 分区渲染在**动作行正下方**（`IdentityCard` 的 `pickers`），不再渲染在整页末尾：这一页比视口高，
+  渲染在末尾时打开的分区落在折叠线以下，用户看到的就是"按了没反应"。
+- 无卡片的状态（未关联 / 加载 / 读取失败）没有动作行，分区回到页面级，位置在空状态卡片之后。
+- 分区在卡片内用 `flat` 材质（不再套一层 `Card`），避免卡片套卡片。
+- `新建工作区文件` 是内联表单（名称 + 创建 / 取消，`data-field="create-name"`，Enter 提交），
+  **不再用 `window.prompt`**：Electron 的渲染进程没有 prompt 委托，旧实现点了只会抛错、什么都不发生。
+  名称走既有 `create` 命令 / 端点，宿主会自己补 `.code-workspace` 后缀。
+
+#### 4.6.8 折叠详情（`compact`）
+
+- 从树上点开文件预览时 `patch({ compact: true })`：**路径行、动作行、pickers 一起收起**，卡片只留标题行
+  与「工作区文件夹」树——读数的时候这些管理控件只是在占高度。
+- 标题行最左是 chevron（`action.collapseDetails` / `action.expandDetails`），手动可逆；状态存在 store 里，
+  重渲染、切页签都保持。折叠时不再渲染 `pickers`，所以「刚打开的分区」也跟着收起，不会留在屏上。
+- 只在 `inView`（对话视图）生效：新建会话页的浮层整张卡就是挑文件的界面，动作行是它唯一入口，
+  那里永远展开、也不画 chevron。
 
 ### 4.7 添加文件夹表单
 

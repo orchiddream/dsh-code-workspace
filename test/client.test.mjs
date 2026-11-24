@@ -112,6 +112,9 @@ const primitivesStub = {
   Tooltip: (props) => props.children,
   Toast: (props) => reactShim.createElement('div', { 'data-toast': props.text }, [props.text]),
   IconChevronDownOutlineRegular: () => reactShim.createElement('span', null, ['chevron']),
+  // The platform's file-type artwork: one node per rendered path, so a test can
+  // tell whether a row asked for it by name.
+  FileTypeIcon: (props) => reactShim.createElement('span', { 'data-file-type': String(props.path || '') }, ['file-type']),
   IconRightUpOutlineRegular: () => reactShim.createElement('span', null, ['up']),
   IconWarningOutlineRegular: () => reactShim.createElement('span', null, ['warning']),
 }
@@ -2147,6 +2150,110 @@ test('a one-folder workspace with no workspace file still gets the tree, read-on
   assert.equal(nodesWhere(menu, (node) => node.props && node.props.title === '拖动排序').length, 0, 'no drag handle without a file')
 })
 
+test('the new-workspace-file button opens an inline name field, not a prompt', async () => {
+  // `window.prompt` does not exist in the Desktop renderer, so the old button
+  // threw and looked dead. The form is a store flag plus a field now, and the
+  // name travels on the command channel like every other folder mutation.
+  const { view, commandLog } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  let tree = expand(view.component(kit()))
+  buttonByLabel(tree, '新建工作区文件').props.onClick()
+  tree = expand(view.component(kit()))
+  const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-name')
+  assert.ok(field, 'clicking the button must reveal the name field')
+  field.props.onChange({ target: { value: 'my-app' } })
+  tree = expand(view.component(kit()))
+  buttonByLabel(tree, '创建').props.onClick()
+  await flush()
+  assert.ok(commandLog.some((call) => call.line === '/code-workspace create "my-app"'), JSON.stringify(commandLog))
+})
+
+test('the pickers open under the action row, not at the foot of the page', async () => {
+  // Below the fold they read as buttons that do nothing; the section has to be
+  // where the click was, which here means before the folder list.
+  const listing = { path: 'D:/ws', parent: 'D:/', home: 'C:/Users/edy', entries: [], truncated: false }
+  const { view } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/browse') return ok(listing)
+      return ok(STATE)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  let tree = expand(view.component(kit()))
+  buttonByLabel(tree, '切换文件').props.onClick()
+  await flush()
+  tree = expand(view.component(kit()))
+  const text = textOf(tree)
+  assert.match(text, /浏览目录/)
+  assert.ok(text.indexOf('浏览目录') < text.indexOf('工作区文件夹'), 'the picker precedes the folder list — text: ' + text)
+})
+
+test('recent rows carry the platform file-type icon, and survive without it', async () => {
+  // The tree's own rows classify files through the same helper, so this pins the
+  // helper on the one list a render pass can reach: primitives present → the
+  // platform artwork; primitives absent → our own sheet, never a missing column.
+  const listing = {
+    files: [{ file: 'D:/ws/app.code-workspace', fileDir: 'D:/ws', title: 'app', exists: true, missing: false }],
+  }
+  const opened = await boot({
+    requires: withPrimitives(),
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/recent') return ok(listing)
+      return ok(STATE)
+    },
+  })
+  const props = kit()
+  expand(opened.view.component(props))
+  await flush()
+  let tree = expand(opened.view.component(props))
+  buttonByLabel(tree, '最近使用').props.onClick()
+  await flush()
+  tree = expand(opened.view.component(props))
+  const typed = nodesWhere(tree, (node) => node.props && node.props['data-file-type'] !== undefined)
+  assert.equal(typed.length, 1, 'the recent row must ask the platform for the file type')
+  assert.equal(typed[0].props['data-file-type'], 'D:/ws/app.code-workspace')
+
+  const bare = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/recent') return ok(listing)
+      return ok(STATE)
+    },
+  })
+  expand(bare.view.component(props))
+  await flush()
+  let bareTree = expand(bare.view.component(props))
+  buttonByLabel(bareTree, '最近使用').props.onClick()
+  await flush()
+  bareTree = expand(bare.view.component(props))
+  assert.equal(nodesWhere(bareTree, (node) => node.props && node.props['data-file-type'] !== undefined).length, 0)
+  assert.match(textOf(bareTree), /app/, 'the row still renders without the primitives')
+})
+
+test('the identity card folds its details and keeps the folder tree', async () => {
+  // Reading a preview means the paths and the action row are costing height for
+  // nothing. The fold is a store flag (`compact`), so it survives re-renders and
+  // the same flag is what opening a preview sets; the harness cannot expand the
+  // tree, so this drives the chevron that flips it instead.
+  const { view } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  let tree = expand(view.component(kit()))
+  assert.match(textOf(tree), /新建工作区文件/, 'the details start expanded')
+
+  buttonByTitle(tree, '收起详情').props.onClick()
+  tree = expand(view.component(kit()))
+  assert.doesNotMatch(textOf(tree), /新建工作区文件/, 'the action row folds away')
+  assert.doesNotMatch(textOf(tree), /工作区根目录/, 'so do the paths')
+  assert.match(textOf(tree), /工作区文件夹/, 'the folder tree stays')
+  assert.ok(buttonByTitle(tree, '展开详情'), 'the title row keeps its chevron')
+
+  buttonByTitle(tree, '展开详情').props.onClick()
+  tree = expand(view.component(kit()))
+  assert.match(textOf(tree), /新建工作区文件/, 'and back again')
+})
+
 test('the folder row puts its caret on the column the tree measures from', async () => {
   // The tree used to be laid out from its own `depth` alone, so a child row
   // started LEFT of the folder row that owns it and the nesting read backwards.
@@ -2180,4 +2287,72 @@ test('the folder row puts its caret on the column the tree measures from', async
   assert.equal(row.props.style.padding, '4px 10px')
   assert.equal(row.props.style.gap, 6, 'the 6px gap is what puts the caret at 28, the column the tree starts from')
   assert.equal(nodesWhere(row, (node) => node.props && node.props.title === '展开').length, 1, 'the row keeps its caret')
+})
+
+test('a folder row quotes itself into the draft instead of pretending to be draggable', async () => {
+  // A drag that starts inside the page carries text, not files, so the composer's
+  // drop intake ignores it. The affordance the page can offer is the reference an
+  // Explorer drop of the same file produces: `@path` (a directory with its
+  // trailing slash) written into the draft through the composer's own actions.
+  const inserts = []
+  const inputActions = {
+    captureInsertion: () => ({ start: 5, end: 5, draftRev: 7 }),
+    insertText: (text, span) => {
+      inserts.push({ text, span })
+      return true
+    },
+    setDraft() {},
+    persistDraft() {},
+    addAttachments() { return true },
+    removeAttachment() {},
+    pruneAttachments() {},
+    submit() {},
+  }
+  const { view } = await boot()
+  const props = kit({
+    inputActions,
+    useInput: (selector) => selector({ draft: '看看这个 ', draftRev: 7 }),
+  })
+  expand(view.component(props))
+  await flush()
+  const quote = buttonByTitle(expand(view.component(props)), '引用到对话')
+  assert.ok(quote, 'the folder row must offer the quote affordance when the composer face exists')
+  quote.props.onClick()
+  // No leading space: the draft already ends in whitespace at the captured caret.
+  assert.deepEqual(inserts, [{ text: '@D:/ws/ ', span: { start: 5, end: 5, draftRev: 7 } }])
+
+  // Without that face (the creation-page popover, or a shell that publishes no
+  // input actions) there is no affordance rather than one that cannot work.
+  assert.equal(buttonByTitle(expand(view.component(kit())), '引用到对话'), undefined)
+})
+
+test('a quote never writes a non-path into the draft', async () => {
+  // The first cut handed the whole tree entry to the quote handler and the draft
+  // got `@"[object Object]"`. A row is a path or it is nothing; this pins the
+  // guard so a future wiring mistake cannot reach the composer again.
+  const inserts = []
+  const inputActions = {
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: 1 }),
+    insertText: (text, span) => {
+      inserts.push({ text, span })
+      return true
+    },
+    setDraft() {},
+    persistDraft() {},
+    addAttachments() { return true },
+    removeAttachment() {},
+    pruneAttachments() {},
+    submit() {},
+  }
+  const broken = Object.assign({}, STATE, {
+    roots: [{ index: 0, path: '.', name: null, label: 'ws', resolvedPath: undefined, exists: true, isPrimary: true, relative: '.' }],
+  })
+  const { view } = await boot({ onCommand: () => commandOk(broken) })
+  const props = kit({ inputActions, useInput: (selector) => selector({ draft: '', draftRev: 1 }) })
+  expand(view.component(props))
+  await flush()
+  const quote = buttonByTitle(expand(view.component(props)), '引用到对话')
+  assert.ok(quote, 'the affordance is drawn for the folder row')
+  quote.props.onClick()
+  assert.deepEqual(inserts, [], 'no path means no mention, never a rendered object')
 })
