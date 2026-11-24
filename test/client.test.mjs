@@ -1120,6 +1120,9 @@ test('adding a folder sends the typed path and clears the field', async () => {
   expand(view.component(kit()))
   await flush()
   let tree = expand(view.component(kit()))
+  // The fields live behind the section header's own "新增文件夹" control now.
+  buttonByLabel(tree, '新增文件夹').props.onClick()
+  tree = expand(view.component(kit()))
   const pathInput = inputsIn(tree).find((input) => input.props['data-field'] === 'add-path')
   assert.ok(pathInput, 'the folder path field must exist')
   pathInput.props.onChange({ target: { value: 'D:/third' } })
@@ -1966,6 +1969,7 @@ test('the add-folder form has visible labels and data-field hooks, and an empty 
   const { view } = await boot()
   expand(view.component(kit()))
   await flush()
+  buttonByLabel(expand(view.component(kit())), '新增文件夹').props.onClick()
   const tree = expand(view.component(kit()))
   const pathInput = inputsIn(tree).find((input) => input.props['data-field'] === 'add-path')
   const nameInput = inputsIn(tree).find((input) => input.props['data-field'] === 'add-name')
@@ -2003,6 +2007,7 @@ test('a write in flight marks the page busy and disables the controls that would
   const { view } = await boot({ onCommand: (line) => (line === '/code-workspace list' ? commandOk(STATE) : pending) })
   expand(view.component(kit()))
   await flush()
+  buttonByLabel(expand(view.component(kit())), '新增文件夹').props.onClick()
   const pathInput = inputsIn(expand(view.component(kit()))).find((input) => input.props['data-field'] === 'add-path')
   pathInput.props.onChange({ target: { value: 'D:/third' } })
   buttonByLabel(expand(view.component(kit())), '添加文件夹').props.onClick()
@@ -2229,6 +2234,29 @@ test('recent rows carry the platform file-type icon, and survive without it', as
   bareTree = expand(bare.view.component(props))
   assert.equal(nodesWhere(bareTree, (node) => node.props && node.props['data-file-type'] !== undefined).length, 0)
   assert.match(textOf(bareTree), /app/, 'the row still renders without the primitives')
+})
+
+test('the add-folder control sits in the section header, above the list', async () => {
+  // It used to be a lone "+ 新增文件夹" line under the whole folder list, which is
+  // where a section action does not belong. The header carries it now, and its
+  // fields open between the header and the rows.
+  const { view } = await boot()
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  const flat = nodesWhere(tree, () => true)
+  const toggle = buttonByLabel(tree, '新增文件夹')
+  const firstRow = nodesWhere(tree, (node) => node.props && node.props['data-root-path'] === 'D:/ws')[0]
+  assert.ok(toggle, 'the section header must carry the add control')
+  assert.ok(firstRow, 'the folder rows must render')
+  assert.ok(flat.indexOf(toggle) < flat.indexOf(firstRow), 'the control comes before the list')
+
+  toggle.props.onClick()
+  const opened = nodesWhere(expand(view.component(kit())), () => true)
+  const field = opened.find((node) => node.props && node.props['data-field'] === 'add-path')
+  const rowAfter = opened.find((node) => node.props && node.props['data-root-path'] === 'D:/ws')
+  assert.ok(field, 'opening the control must reveal the fields')
+  assert.ok(opened.indexOf(field) < opened.indexOf(rowAfter), 'the fields open under the header, above the rows')
 })
 
 test('the identity card folds its details and keeps the folder tree', async () => {

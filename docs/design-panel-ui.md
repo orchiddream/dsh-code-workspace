@@ -625,9 +625,13 @@ display flex, alignItems center, gap 2, flex:'none'
 
 ### 4.7 添加文件夹表单
 
-位置：文件夹列表卡片之后，与卡片间距 12；不在卡片内，直接放在页面背景上。
+入口：分区**头部行右端**的 `＋ 新增文件夹`（`Button variant="ghost"`，高 24、`marginLeft:'auto'`、
+`aria-pressed = snapshot.addOpen`）；点开后按钮变 `− 新增文件夹`，字段出现在**头部与列表之间**。
+它原先是一条挂在整段列表下面的独立按钮行——分区自己的动作不该在内容之后，且字段离点击处太远。
 
-结构（纵向 gap 12）：
+只有存在工作区文件时才画这个入口（文件夹由文件声明，没有文件就没有可写的地方）。
+
+结构（纵向 gap 8）：
 
 ```
 [label 12/18 TOKEN.labelDim]  文件夹路径（相对或绝对）          ← t('field.folderPath')
