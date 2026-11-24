@@ -77,7 +77,7 @@ It performs precisely what `pnpm add link:<dir>` would have done, and nothing el
 2. `"dsh-code-workspace"` appended to `dsh.profile.bundles`
 3. a directory junction at `<profile>\node_modules\dsh-code-workspace` pointing at this repo
 
-Measured behaviour: **a running DSH application hot-applies this composition change — no restart needed.** Reload the page and the "Code Workspace" button is in the session header. If the entry does not appear, restart the backend.
+Measured behaviour: **a running DSH application hot-applies this composition change — no restart needed.** Reload the page and the "Code Workspace" tab is beside Chat / Trajectory / Git (only in a composition where that tab cannot register does a "◆ Code Workspace" button appear in the session header instead). If no entry appears at all, restart the backend.
 
 ```bash
 node tools/profile-link.mjs status    --profile desktop   # current state

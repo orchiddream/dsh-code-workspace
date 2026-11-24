@@ -80,7 +80,7 @@ node tools/profile-link.mjs install --profile desktop             # 执行（自
 2. `dsh.profile.bundles` 追加 `"dsh-code-workspace"`
 3. 在 `<profile>\node_modules\dsh-code-workspace` 建目录联接指向本仓库
 
-实测：**运行中的 DSH 应用会热加载这个组合变更，不需要重启**——加完刷新一下页面，会话头部就出现「代码工作区」按钮。若入口没出现，再重启后端。
+实测：**运行中的 DSH 应用会热加载这个组合变更，不需要重启**——加完刷新一下页面，「代码工作区」页签就在「对话 / 轨迹 / Git」旁边了（只有在页签注册不了的组合里，才会改成在会话头部出现一个「◆ 代码工作区」按钮）。若什么入口都没出现，再重启后端。
 
 ```bash
 node tools/profile-link.mjs status    --profile desktop   # 查看当前状态
