@@ -4,7 +4,7 @@
 
 > VS Code–compatible multi-root workspaces for DeepSeek Harness. A `.code-workspace` file is the single source of truth: the session is rooted at its **first `folders[]` entry that exists on disk**, every other folder becomes an additional root, and the same file is what "open in an editor" hands to the editor — so the window you look at shows the same folders the session writes to.
 
-Zero build step — `lib/index.js` is plain ESM for the Host, `lib/client.js` is a hand-written DSH client-modules factory bundle.
+Zero build step for the plugin itself — `lib/index.js` is plain ESM for the Host, `lib/client.js` is a hand-written DSH client-modules factory bundle, and `lib/vendor/monaco` is the one prebuilt artifact (the read-only code viewer's editor build).
 
 ---
 
@@ -126,18 +126,18 @@ Five entries, one workspace file:
 | Entry | Where |
 | --- | --- |
 | **The left column** | a "Code Workspace" row in the sidebar panel list, beside the shipped Plugins and Scheduled-tasks rows — **openable with no session and no workspace** |
-| **Session-creation page** | the "Code Workspace" chip above the composer, in the same band as the git-branch chip |
+| **Session-creation page** | the "◆ Code Workspace" chip at the right end of the workspace / agent-preset row, on the same line as both (`conversation.hero.options`) |
 | **The panel's tab** | the "Code Workspace" tab beside Chat / Trajectory / Git, for the whole life of the session |
 | **Session header** | the same action as a header button — present only in a composition where that tab could not register |
 | **Slash command** | `/code-workspace use <path>` |
 
-The left-column row is the one entry that needs nothing else to exist: it is a `sidebar.panellist` cell (`id` `code-workspace`, order 5 — between Plugins at 0 and Scheduled tasks at 10) whose click runs the shell's `layout.selectPanel('code-workspace')`, and that id is also the key of this bundle's `main` cell and of its Conversation view. So the sidebar row, the Conversation tab and that panel id all address **one page**, and the page is sessionless: it reads the host over the shared RPC channel and can register a workspace before any session exists.
+The left-column row is the one entry that needs nothing else to exist: it is a `sidebar.panellist` cell (`id` `code-workspace`, order 5 — between Plugins at 0 and Scheduled tasks at 10) whose click runs the shell's `layout.selectPanel('code-workspace')`, and that id is also the key of this bundle's `main` cell and of its Conversation view. The row and the tab share one id, but not one page: the left column opens the **manager** — the list of workspace files, with no session involved, reading the host over the shared RPC channel — while the tab is the **detail** card for the session it is drawn for.
 
-The panel can browse the filesystem for a `.code-workspace` file or create a new one. Once one is chosen, the plugin calls `workspaceRegistry.create()` to register that file's **derived root** — its first existing folder — as a DSH workspace and — when the client composition exposes `uiWorkspace` — switches the session straight to it. Inside a session the pick rides the `/code-workspace` channel, so the choice is attributed to the session that made it: two sessions rooted at the same directory can each run a different workspace file.
+The manager page and both detail surfaces can browse the filesystem for a `.code-workspace` file; creating one needs a directory, so only the detail surfaces (which have a session) offer that. Once a file is chosen, the plugin calls `workspaceRegistry.create()` to register that file's **derived root** — its first existing folder — as a DSH workspace and — when the client composition exposes `uiWorkspace` — opens it. Inside a session the pick rides the `/code-workspace` channel, so the choice is attributed to the session that made it: two sessions rooted at the same directory can each run a different workspace file.
 
 **Choose in Explorer…** opens the host's own file dialog, filtered to `*.code-workspace`, so the common case does not need the in-app browser at all. The shipped picker seam only answers directories (its native capability opens the platform dialog with a pick-folders flag), so this is the file-shaped sibling: a generated PowerShell script over the same absolute `powershell.exe`, with `-STA` because the common file dialog is apartment-threaded, and the chosen path read from a file rather than parsed out of stdout. Three answers, all meaningful: a path is opened; a **cancel** is silent, because it is the operator's choice; **unavailable** explains itself once — non-Windows, or the operator is not at the host's screen (SSH) — and the in-app browser below stays right there. The dialog is a host-desktop affair; over SSH it deliberately does not appear.
 
-**With nothing associated yet, the page is the picker.** A session created in a directory that holds no `.code-workspace` file (or that holds several) shows the panel's empty state with **Switch file** and **New workspace file** right there — you do not have to create the session in the right directory first. With nothing to go on, the browser starts at the **host home**, not at the session's own directory, because the file you are looking for is usually somewhere else; once a file IS associated, **Switch file** and the host dialog start at that file's own directory instead, so a user who keeps their workspace files together switches between them without navigating back each time. Picking one registers its derived root as the DSH workspace and, when `uiWorkspace` is available, switches the current session to it — which is how an already-open session ends up on a real workspace without leaving the tab.
+**With nothing associated yet, the action row is the picker.** A session created in a directory that holds no `.code-workspace` file (or that holds several) lands on the card with no file, and its action row offers **Switch file** and **New workspace file** right there — you do not have to create the session in the right directory first. (The tree below it still lists the session root, so the code stays reachable; the manager page has no such card — its header carries **Switch file** and **Pick from Explorer…** above the list.) With nothing to go on, the browser starts at the **host home**, not at the session's own directory, because the file you are looking for is usually somewhere else; once a file IS associated, **Switch file** and the host dialog start at that file's own directory instead, so a user who keeps their workspace files together switches between them without navigating back each time. Picking one registers its derived root as the DSH workspace and, when `uiWorkspace` is available, switches the current session to it — which is how an already-open session ends up on a real workspace without leaving the tab.
 
 Independently, **if the session's cwd holds exactly one `.code-workspace` file the plugin adopts it automatically** and records it, so in that case there is nothing to do: just create the session in that directory. Two or more candidates is ambiguous and resolves to nothing — pick one in the panel. The same directory full of several workspace files therefore grants nothing on its own: each file has its own root, and only an explicit pick decides which one a session is on. A root that is named by more than one file says so in the panel — "other workspace files naming the same root", one clickable row per file, and the same fact in the prompt — because DSH keys a workspace by its root's canonical path, so those files are one DSH workspace and only an explicit per-session choice keeps them apart.
 
@@ -162,40 +162,49 @@ Folders changed from inside a session are announced to the Agent at the **next m
 
 ### The panel
 
-Two surfaces, one body. The panel's page is a **Conversation view** — a tab beside the shipped Chat / Trajectory / Git tabs, at the top of the centre column. The tab is the entry point: it is visible for the whole session. The session-creation chip opens the same body as a floating popover, because that page has no session yet — and that popover is the creation page's only surface.
+One page id, three faces, two bodies.
+
+- The **Conversation view** — a tab beside the shipped Chat / Trajectory / Git tabs, visible for the whole session — is the **detail** body: it says which workspace file this session is on, and every action on it belongs to that session.
+- The **floating popover** (`shell.overlay`) draws the same detail body on the sessionless channel: the creation page has no session yet, and the popover is the only way to pick a `.code-workspace` file there.
+- The **left column's "Code Workspace" row** opens the **manager page**: the file list and two ways to add one, with no detail card.
 
 | Surface | Opened by | Notes |
 | --- | --- | --- |
-| **Conversation view** | its tab in the strip | cell `code-workspace` (order 30) in the list slot `conversation.view`; per session |
-| **Floating popover** (`shell.overlay`) | the session-creation chip | the same body on the sessionless channel: the one place a `.code-workspace` file can be picked before a session exists |
+| **Conversation view** | its tab in the strip | cell `code-workspace` (order 30) in the list slot `conversation.view`; per session; the detail card |
+| **Floating popover** (`shell.overlay`) | the session-creation chip | the same detail body on the sessionless channel: the one place a file can be picked before a session exists |
+| **Manager page** | the left column's row | `sidebar.panellist` and `main` under one id; no session needed; the list, not the card |
 
-The view belongs to the session it is drawn for, and it addresses that session's own directory — so a panel left on one session never drives another. React mounts it when its tab is selected and unmounts it when the user leaves, so one read per mount is exactly "show me the current state"; the ⟳ button re-reads on demand.
+The session header button exists **only in the degraded composition** where the view cell could not register — there the tab does not exist and the button is the only way in. When the tab is there the button removes itself: two entry points for one page is noise, and a header click that also opened a floating copy of the page was worse than a click that does nothing.
 
-The session header button exists **only in the degraded composition** where that cell could not register — there the tab does not exist and the button is the only way into the page. When the tab is there the button removes itself: two entry points for one page is noise, and a header click that also opened a floating copy of the page was worse than a click that does nothing.
+The detail body shows the workspace file path, the **workspace root** it derives, the file's own directory when it differs from that root, every folder (display name, real path, primary/missing badges) and, when the root is named by more than one file, an "other workspace files naming the same root" block with one clickable row per file. It offers:
 
-Every surface shows the workspace file path, the **workspace root** it derives, the file's own directory when it differs from that root, every folder (display name, real path, primary/missing badges) and, when the root is named by more than one file, an "other workspace files naming the same root" block with one clickable row per file. It offers:
-
-- **Add folder** — a relative or absolute path plus an optional display name; a missing or non-directory path is refused
-- **Move up / down** — reorder `folders`
-- **Rename** — set `folders[].name`
-- **Remove**
-- **Show in file manager**
-- **Open in DSH terminal** — one `>_` button per folder row, handing it to the right Sidebar's built-in terminal (see below)
-- **Open in editor** — one button per VS Code-family editor found on the host (see below)
+- **A folder row** — display name, real path, primary/missing badges, and a `>_` terminal shortcut. Expanding it shows that folder's files; move up / down, rename, show in file manager and remove live in the row's context menu (right-click, or the `⋯` button)
+- **Add folder** — a relative or absolute path plus an optional display name; a missing or non-directory path is refused. Collapsed to a single `＋` row
+- **Open in editor** — one button per VS Code-family editor found on the host, in the card's title row (see below)
 - **Switch file** / **Recent** / **New workspace file** / **Unlink**
 
-The workspace list marks the **active file**, not the directory: two files can derive the same root — DSH then treats them as one workspace — so marking by root would light up every row and tell the user nothing.
+**A session with no `.code-workspace` file still gets the tree.** The file decides how many roots there are, not whether the code can be read: a session rooted at one directory is a one-folder workspace, so that directory is the tree's single top-level row — expand it, click a file, and the preview opens in the right column. The row is **read-only**: its `⋯` menu keeps "show in file manager" (and the terminal shortcut when a session exists), but move / rename / remove, the drag handle and "add folder" are absent — every one of those writes the workspace file, and there is none.
+
+#### The manager page (the left column's entry)
+
+This page draws no detail card, and that is a boundary, not a shortcut: "unlink", "add folder" and the project terminal all speak **about a session**, and this page has none by construction. Copied here they could only mean something global — the same red button means "this session stops using the file" in the tab and "erase this root's record" here — and the card would push the list, the page's actual subject, below the fold. So the page is the list:
+
+- every `.code-workspace` file this plugin knows, most recently used first, marked **registered / current / missing**;
+- **Switch file** (the plugin's own browser), **Pick from Explorer…** (the host's own dialog) and ⟳ to re-read, in the section header — the only controls the page has. The list is read fresh on every open, so it cannot report a state from before a file was picked elsewhere;
+- **New workspace file** is deliberately absent: creating one needs a directory, and this page has no session to supply one. The two surfaces that do have one keep the action;
+- the list marks the **current file**, not the directory: two files can derive the same root — DSH then treats them as one workspace — so marking by root would light up every row and tell the user nothing;
+- clicking a row opens that workspace: its derived root is registered and, when `uiWorkspace` is available, the session switches to it.
 
 #### The Conversation view (the tab in the centre column)
 
 The page registers as one cell in the `conversation.view` slot: `slots.register({ name: 'conversation.view', id: 'code-workspace', order: 30, label: () => 'Code Workspace', locale: NS }, WorkspaceView)`. That slot is the list behind the Chat / Trajectory / Git strip — its owner walks the entries and renders one at a time by id, so one registration is enough, and order 30 puts it after the shipped Chat (0) and Trajectory (10). Once it is selected:
 
 - The page fills the Conversation's own view area, so there is no second column: its content is held to the Conversation's own reading width (`--dsh-chat-content-width`, with a fallback) and it scrolls internally.
-- Closing is the tab strip's job, so this page carries **no ✕**; a hint line takes its place. The ⟳ button beside the title stays, as in the floating panel.
+- Closing is the tab strip's job, so this page carries **no ✕**; the ⟳ button beside the title stays, as in the floating panel.
 - The page is **per session**: the owner hands the cell the standard session kit, so it reads `props.sessionId` and that session's `cwd`. Switching sessions re-points the shared panel state and drops the previous session's state — otherwise a panel opened on session A would send `/code-workspace` into session B.
 - React mounts this when its tab is selected and unmounts it when the user leaves, so one read per mount is exactly "show me the current state" — no read window and no throttle. The ⟳ button forces a re-read.
 
-Two surfaces, one difference: the tab strip closes the Conversation view, while the floating panel (`shell.overlay`) keeps its ✕. **The overlay is not the view's fallback path**: it is the creation page's alone — that page has no session, so a floating popover is the only way to pick a `.code-workspace` file there. It draws only when the store says the creation page opened it, and opening the Conversation view closes it, so one panel never appears twice on screen.
+The detail body's two surfaces differ in one place: the tab strip closes the Conversation view, while the floating panel (`shell.overlay`) keeps its ✕. **The overlay is not the view's fallback path**: it is the creation page's alone — that page has no session, so a floating popover is the only way to pick a `.code-workspace` file there. It draws only when the store says the creation page opened it, and opening the Conversation view closes it, so one panel never appears twice on screen.
 
 **Known boundary**: the Conversation view needs a session — the owner's session kit is its only source for the session root (`props.sessionId` → that session's `cwd`), so the session-creation page cannot use it and falls back to the floating popover. It also rests on two upstream facts: `conversation.view` gets the cell claimed by the tab strip, and `ctx.layout` (the package that declares that slot) selects it. Without the layout service the cell does not register at all, and only then does the session-header button render as the degraded entry point; and even when the cell registers, a `selectPanel` that refuses this id leaves a header click doing nothing.
 
@@ -205,7 +214,7 @@ Two entries, one behaviour: the editor opens the **workspace file**.
 
 | Entry | Where |
 | --- | --- |
-| **Panel section** | "Open in editor" in the panel: one button per editor this host can prove |
+| **Identity card header** | The editor buttons sit in the workspace card's title row: one per editor this host can prove |
 | **"Open In…" menu** | The shipped session-header and file-tree control, which this plugin takes over (see below) |
 
 The family, in the order the panel offers it and the automatic choice follows it:
@@ -224,9 +233,24 @@ The remembered editor is stored per browser under `dsh.code-workspace.editor`; t
 
 On `0.2.2-rc.5` that takeover used to throw `Cannot read properties of undefined (reading 'openInAppFamily')` and crash its slot entry: the plugin's own `hooks` bag no longer reaches the component, and a takeover that replaces the shipped control while failing to render leaves the user with no "Open In…" control at all. The takeover's controller is now a plugin-level singleton; the control prefers `props.hooks.*` and falls back to that instance, and `useMenuStore(store, fallback)` answers with a default instead of throwing on a missing store. Both slot behaviours render, and a slot failure can no longer take the shipped control down with it.
 
+### Reading code in the app
+
+The right Sidebar's file preview opens code files in a **read-only Monaco editor** — the editor VS Code itself runs — instead of the shipped highlighted `<pre>`: syntax highlighting for every bundled language, folding, find (`Ctrl+F`), bracket matching, sticky scroll, and, on a wide pane, the minimap. Nothing is editable and nothing is written back; the file still belongs to the agent and to your own editor.
+
+Every workspace folder is a row in the workspace card's own explorer, and it expands in place to that folder's files — including the additional folders the shipped single-root Files page can never list. Clicking a file opens it in that same preview; a path outside the session root travels as an absolute `dsh-resource://file/session/…` address, which the Host reads because file reads are not workspace-contained.
+
+It is a document-preview renderer registered at `priority: 'extension'`, so it wins over the shipped `code` renderer for the same file suffixes while that renderer stays registered underneath — disabling this plugin brings the old preview straight back, and the per-file viewer menu still lists both.
+
+How it is delivered:
+
+- The vendored build lives in `lib/vendor/monaco` and is fetched lazily on the first code preview from a prefix route the Host half registers on `ctx.webServer` (`GET /code-workspace-assets/monaco.js`, `.css`, `.worker.js`, and the icon font). No network and no CDN.
+- The editor follows the app's palette (`body[data-ds-dark-theme]`) and samples the pane's background so it blends in; a live theme switch updates an open editor.
+- It is read-only by design: writing files back belongs to the external editor the "Open in editor" buttons launch.
+- A composition without the Document Preview plugin has no seam to extend, and a Host without the asset route falls back to a plain text body; neither breaks the panel.
+
 ### A terminal per folder
 
-The leftmost button on each folder row is `>_` (first in the `↑ ↓ ✎ ⧉ ✕` group). It opens DSH's **own** interactive terminal in the right Sidebar — not an external terminal window. The PTY, screen recovery, quota and process cleanup belong to the upstream terminal service; this plugin only supplies the entry point and the directory.
+Each folder row keeps its `>_` shortcut beside the `⋯` menu button. It opens DSH's **own** interactive terminal in the right Sidebar — not an external terminal window. The PTY, screen recovery, quota and process cleanup belong to the upstream terminal service; this plugin only supplies the entry point and the directory.
 
 - **Primary root** (the session root): opened directly at the session cwd, with no extra command typed.
 - **Additional roots**: the shell starts at the session cwd, then the plugin writes a `cd` into the PTY (`Set-Location -LiteralPath` for PowerShell, `cd /d` for cmd, plain `cd` for POSIX shells, with Windows drive paths converted to the MSYS spelling). **That line stays visible on screen** — upstream `terminal/create` accepts only `shellPath` / `id` / `cols` / `rows` and has no cwd field, so this is the only honest way to land in the directory.
@@ -301,7 +325,7 @@ A Workspace's identity in DSH is its root directory's `realpath`-canonicalised p
 | Editor icon | `lib/editor-icon.js` | One executable's associated icon for the family entries no shipped route serves; verified payload or nothing |
 | File dialog | `lib/workspace-picker.js` | The host's own file dialog for a `.code-workspace` file — the file-shaped sibling of the shipped directory-only picker; three outcomes (picked / cancelled / unavailable), injectable runner, no dialog in any test |
 | Host | `lib/index.js` | Discovery and caching, `tools/execute` re-rooting, prompt injection, notices, `/code-workspace`, the sessionless `codeWorkspace/*` remote API, `@` discovery, the editor and file-dialog endpoints |
-| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation dock chip and its popover, the "Open In…" takeover, `@` companion group, the per-folder built-in terminal shortcut |
+| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback (degraded compositions only), the session-creation row chip (`conversation.hero.options`) and its popover, the "Open In…" takeover, `@` companion group, the per-folder built-in terminal shortcut |
 
 - **Discovery**: for a session rooted at `C`, the active file is (1) the file THIS SESSION picked, (2) `C`'s most recent explicit record — a tombstone there stops the search — (3) **adoption**: `C` holding exactly one `.code-workspace` file, (4) nothing, which makes the plugin inert for that session. Two or more candidates is a fail-closed tie. The old rule — "the recorded file whose *directory* is `C`" — is gone: with several files in one folder it returned whichever happened to be recorded first.
 - **Caching**: model 2 s, discovery 3 s, `@` index 4 s. `fs.stat` metadata is deliberately **not** used for invalidation — the fields an `FsInfo` carries are not part of the plugin-facing contract, so a stamp built from them could silently never change and pin a stale root set for a whole session. Panel and command reads always force a fresh parse, so the derived root is recomputed on every such read.

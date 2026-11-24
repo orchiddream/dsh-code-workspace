@@ -364,8 +364,10 @@ The panel now has **two surfaces with different scopes**, and the split is the p
 Both pages register under **one id**, `code-workspace`, and that is deliberate: a
 `sidebar.panellist` id IS the `main` key it opens — the shell resolves a click through
 `layout.selectPanel(id)` — and this bundle's Conversation view already answers to
-`code-workspace`. So the sidebar row, the tab and `selectPanel('code-workspace')` all
-address one page, and there is no second id that could drift out of step.
+`code-workspace`. The sidebar row, the tab and `selectPanel('code-workspace')` therefore
+address one *id*, with two bodies behind it: the left column opens the manager (the
+list of workspace files), the tab is the detail card for its session. There is no second
+id that could drift out of step.
 
 A **docked right-Sidebar page** was tried first and rejected: the right column is narrow,
 its content is not the conversation's width, and the workspace form's action rows wrapped
@@ -450,6 +452,23 @@ been shown to be absent, and a `.code-workspace` file for the repository you are
 usually sits somewhere else entirely. Home is the closest thing to "somewhere to browse
 from" that a host can name; when the host publishes none, the session directory is the
 fallback.
+
+### A one-folder workspace is still browsable
+
+A `.code-workspace` file is what *declares* several folders; it is not what makes a
+folder readable. A session rooted at one directory with no file — the common case —
+would otherwise land on a card that says "no workspace file" with nothing under it, and
+the code the session is rooted at would be unreachable from the page that exists to show
+it.
+
+So the tree is rendered either way. With no file associated, `singleFolderRoot`
+synthesises the session root as its one top-level row while the state keeps saying
+`roots: []`: the model still means "nothing declares folders", and the page shows the
+folder the session actually has. That row is read-only — its `⋯` menu keeps reveal (and
+the terminal shortcut when a session exists) but drops move / rename / remove, there is
+no drag handle, and the add-folder form is not drawn — because every folder edit writes
+the file, and there is none. The same switch is the one `FolderList` watches to decide
+whether a row is manageable.
 
 ### Where a choice is attributed, and how a duplicate is reported
 
@@ -700,9 +719,11 @@ Everything else is client-only:
   -LiteralPath` for PowerShell, `cd /d` for cmd, POSIX `cd` otherwise (a Windows
   drive path is converted to the MSYS form). The primary root skips it, because
   the session cwd already is that folder.
-- The shortcut is absent on the sessionless surfaces (the left-column page and the
-  creation popover): the right Sidebar's terminal attaches to the on-screen
-  Session, and those surfaces have none. One hint line says where it lives.
+- The shortcut needs a folder row and a session id, so the manager page (the left
+  column) has neither: it draws no folder block at all, and `terminalEnabled` is false
+  without a session. The hint line that used to explain that went away with the folder
+  block; the Conversation tab and the creation popover both address a session, so their
+  rows keep the button.
 
 The terminal runs with the host's **system-user permissions**, independently of
 the Agent sandbox: the plugin decides the directory, never the terminal's rights.

@@ -423,11 +423,11 @@ async function boot({ onRpc, onCommand, services = {}, requires = {}, dictionari
     },
   })
   const header = harness.slot('conversation.session.header.actions')
-  const dock = harness.slot('conversation.input.dock')
+  const hero = harness.slot('conversation.hero.options')
   const overlay = harness.slot('shell.overlay')
   const view = harness.slots.find((entry) => entry.spec.name === 'conversation.view')
   const panel = harness.slots.find((entry) => entry.spec.name === 'main')
-  return { harness, rpcLog, commandLog, header, dock, overlay, view, panel, layout: face, confirmations: harness.confirmations, localStorage: harness.localStorage }
+  return { harness, rpcLog, commandLog, header, hero, overlay, view, panel, layout: face, confirmations: harness.confirmations, localStorage: harness.localStorage }
 }
 
 /** Props the standard kit would inject for a session-scoped entry. */
@@ -454,12 +454,12 @@ test('the bundle registers one factory under the package name and exports name/i
   assert.equal(typeof exportsObject.apply, 'function')
 })
 
-test('apply registers the View tab, the sidebar entry, its panel, the header action, the dock entry and the overlay', async () => {
+test('apply registers the View tab, the sidebar entry, its panel, the header action, the hero-row chip and the overlay', async () => {
   const face = layoutStub()
   const harness = await bootClient({ services: face.services })
   assert.deepEqual(
     harness.slots.map((entry) => entry.spec.name),
-    ['conversation.session.header.actions', 'conversation.input.dock', 'shell.overlay', 'main', 'sidebar.panellist', 'conversation.view'],
+    ['conversation.session.header.actions', 'conversation.hero.options', 'shell.overlay', 'main', 'sidebar.panellist', 'conversation.view'],
   )
   const header = harness.slot('conversation.session.header.actions').spec
   assert.equal(header.id, 'code-workspace')
@@ -467,9 +467,11 @@ test('apply registers the View tab, the sidebar entry, its panel, the header act
   assert.equal(header.locale, 'code-workspace')
   assert.equal(header.label(), '代码工作区')
 
-  const dock = harness.slot('conversation.input.dock').spec
-  assert.equal(dock.id, 'code-workspace')
-  assert.equal(dock.order, 120)
+  // The New Session row's right end: one line with the workspace picker and the
+  // agent-preset control, never a row of its own above the composer card.
+  const hero = harness.slot('conversation.hero.options').spec
+  assert.equal(hero.id, 'code-workspace')
+  assert.equal(hero.order, 120)
 
   // `shell.overlay` has no owner props and is click-through: an id is required,
   // and no `locale` seat is asked for by the panel itself.
@@ -564,10 +566,10 @@ test('a panel addressed to another surface never draws the floating window', asy
 })
 
 test('the page takes the panel over from a popover that was already open', async () => {
-  const { dock, view, overlay } = await boot()
+  const { hero, view, overlay } = await boot()
   // Pick a workspace file on the creation page: that popover is the one surface
   // a sessionless page has, so it must keep working.
-  expand(dock.component(kit())).children[0].props.onClick()
+  expand(hero.component(kit())).props.onClick()
   await flush()
   assert.ok(expand(overlay.component({})), 'the creation-page popover must render')
   // Then the user opens the page. The popover is the same panel on another
@@ -676,7 +678,9 @@ test('switching to another session re-addresses the shared store, so no command 
   assert.deepEqual(commandLog.map((call) => call.sessionId), ['session-1', 'session-2'], 'session 2 must be read on its own turn: ' + JSON.stringify(commandLog))
   const two = expand(view.component(propsFor('session-2')))
   assert.match(textOf(two), /D:\/ws\/app\.code-workspace/)
-  buttonByTitle(two, '移除').props.onClick()
+  // The management actions live in the row's context menu.
+  buttonByTitle(two, '更多操作').props.onClick({ clientX: 12, clientY: 12 })
+  buttonByLabel(expand(view.component(propsFor('session-2'))), '移除').props.onClick()
   await flush()
   const remove = commandLog.find((call) => call.line === '/code-workspace remove 0')
   assert.ok(remove, 'the mutation must be issued')
@@ -707,6 +711,9 @@ test('a re-render never triggers a read, and a remount reads once', async () => 
 test('a stale record can be removed from the list, and the file itself is not touched', async () => {
   const calls = []
   const { panel, confirmations } = await boot({
+    // No registered DSH workspace, so the list is empty once the only record is
+    // gone — which is what the page's empty copy is about.
+    services: { workspaces: { list: { getSnapshot: () => ({ items: [] }) } } },
     onRpc: (endpoint, args) => {
       if (endpoint === 'codeWorkspace/recent') {
         return ok({ files: [{ file: 'D:/gone/old.code-workspace', rootDir: 'D:/gone', title: 'old', exists: false, missing: true }] })
@@ -789,7 +796,7 @@ test('with nothing associated the page itself is the picker, starting at the hos
 
 // ------------------------------------------- the sidebar entry and its panel
 
-test('the sidebar entry opens a sessionless panel, so it works with no workspace open yet', async () => {
+test('the sidebar entry opens the sessionless manager page, so it works with no workspace open yet', async () => {
   const { panel, overlay, commandLog, rpcLog } = await boot()
   assert.ok(panel, 'the sidebar panel must register as the main cell')
   expand(panel.component({}))
@@ -797,10 +804,24 @@ test('the sidebar entry opens a sessionless panel, so it works with no workspace
   // No session exists here, so the page drives the host's sessionless channel.
   // That is the whole point of this entry: it does not need a Workspace.
   assert.deepEqual(commandLog, [])
-  assert.ok(rpcLog.some((call) => call.endpoint === 'codeWorkspace/editors'), JSON.stringify(rpcLog))
-  // Nothing is associated yet, so the page offers the picker rather than a status.
+  assert.deepEqual(
+    rpcLog.map((call) => call.endpoint),
+    ['codeWorkspace/recent'],
+    'the page reads the list, and asks for no session-scoped state',
+  )
   const tree = expand(panel.component({}))
+  // The page IS the manager: the files this app knows, and the ways to add one.
   assert.match(textOf(tree), /代码工作区/)
+  assert.match(textOf(tree), /切换文件/)
+  assert.match(textOf(tree), /从资源管理器选择/)
+  // The Conversation tab's detail card is NOT repeated here: its actions are
+  // scoped to a session, and this page has none. A card on this page would say
+  // "unlink this workspace" with no session to attribute the choice to.
+  assert.equal(nodesWhere(tree, (node) => node.type === 'h1').length, 0, 'no identity card on the manager page')
+  assert.doesNotMatch(textOf(tree), /工作区根目录/)
+  // Creating a workspace file needs a directory, and this page has no session to
+  // supply one, so the action stays where a directory exists.
+  assert.doesNotMatch(textOf(tree), /新建工作区文件/)
   assert.equal(expand(overlay.component({})), null)
 })
 
@@ -912,13 +933,17 @@ test('choosing a listed workspace opens it, which is how a session moves between
 
 test('the sidebar panel shows a workspace picked on the creation page', async () => {
   const opened = []
-  const { dock, overlay, panel } = await boot({
+  const { hero, overlay, panel } = await boot({
     services: { uiWorkspace: { openWorkspace(id) { opened.push(id); return Promise.resolve() } } },
     onRpc: (endpoint) => {
       if (endpoint === 'codeWorkspace/open') {
         return ok(Object.assign({}, STATE, { workspace: { id: 'w9', path: 'D:/ws', title: 'app' } }))
       }
-      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      // `open` records the file, so the manager's own read already lists it: the
+      // page never has to invent a row for the file it is on.
+      if (endpoint === 'codeWorkspace/recent') {
+        return ok({ files: [{ file: 'D:/ws/app.code-workspace', fileDir: 'D:/ws', title: 'app', exists: true, missing: false }] })
+      }
       if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
       if (endpoint === 'codeWorkspace/browse') {
         return ok({ path: 'D:/ws', parent: 'D:/', home: 'C:/Users/edy', entries: [], truncated: false })
@@ -927,14 +952,17 @@ test('the sidebar panel shows a workspace picked on the creation page', async ()
     },
   })
   // Pick the file on the creation page, which has no session…
-  expand(dock.component(kit())).children[0].props.onClick()
+  expand(hero.component(kit())).props.onClick()
   await flush()
   assert.match(textOf(expand(overlay.component({}))), /D:\/ws\/app\.code-workspace/)
   // …then the user opens the sidebar page, for the same workspace, with no session.
   expand(panel.component({}))
   await flush()
   const tree = expand(panel.component({}))
-  assert.match(textOf(tree), /D:\/ws\/app\.code-workspace/)
+  const row = nodesWhere(tree, (node) => node.props && node.props.title === 'D:/ws/app.code-workspace')[0]
+  assert.ok(row, 'the picked workspace must be listed — text: ' + textOf(tree))
+  // The active marker is the row's, not a second card's.
+  assert.match(textOf(tree), /◆/, 'the list marks the file the page is on')
   assert.equal(expand(overlay.component({})), null, 'the sidebar page takes over from the popover')
 })
 
@@ -1052,18 +1080,17 @@ test('a host that cannot show the dialog says so once, and the browser stays usa
   assert.ok(buttonByLabel(tree, '上级'))
 })
 
-test('the dock entry renders only in the hero phase', async () => {
-  const { dock } = await boot()
-  const heroTree = expand(dock.component(kit()))
-  assert.ok(heroTree, 'the dock chip must render on the blank-session hero')
+test('the hero-row chip renders with the New Session row, without a phase guard', async () => {
+  const { hero } = await boot()
+  // The row is drawn only during the hero phase, so the seat is the guard: the
+  // entry must render on the kit it is handed and never self-filter. The phase
+  // test it used to carry lived on the dock's `props.session`, which this seat
+  // does not pass — that is what made the chip vanish from the row.
+  const heroTree = expand(hero.component(kit()))
+  assert.ok(heroTree, 'the hero-row chip must render on the New Session row')
   assert.match(textOf(heroTree), /代码工作区/)
-  // A session that already has a prompt is no longer the hero phase.
-  const past = kit({
-    useSessions: (selector) =>
-      selector({ byId: { 'session-1': { cwd: 'D:/ws', blank: false, running: false, promptAttempted: true, openState: 'open' } } }),
-    session: { blank: false },
-  })
-  assert.equal(expand(dock.component(past)), null)
+  // The title still resolves the session's root from the standard kit.
+  assert.equal(heroTree.props.title, 'D:/ws')
 })
 
 test('removing a folder from the page issues the indexed remove command', async () => {
@@ -1071,10 +1098,11 @@ test('removing a folder from the page issues the indexed remove command', async 
   expand(view.component(kit()))
   await flush()
   const tree = expand(view.component(kit()))
-  // The page's ✕ is gone (the tab strip owns navigation), so address the row
-  // action by its accessible title.
-  const remove = buttonByTitle(tree, '移除')
-  assert.ok(remove, 'a remove button must exist')
+  // The row's management actions live in its context menu, opened by `⋯`.
+  buttonByTitle(tree, '更多操作').props.onClick({ clientX: 12, clientY: 12 })
+  const menu = expand(view.component(kit()))
+  const remove = buttonByLabel(menu, '移除')
+  assert.ok(remove, 'the context menu must offer remove')
   remove.props.onClick()
   await flush()
   assert.ok(commandLog.some((call) => call.line === '/code-workspace remove 0'), JSON.stringify(commandLog))
@@ -1105,9 +1133,9 @@ test('adding a folder sends the typed path and clears the field', async () => {
 })
 
 test('on the creation page the panel uses the sessionless channel, not the command channel', async () => {
-  const { dock, rpcLog, commandLog } = await boot()
-  const chip = expand(dock.component(kit()))
-  chip.children[0].props.onClick()
+  const { hero, rpcLog, commandLog } = await boot()
+  const chip = expand(hero.component(kit()))
+  chip.props.onClick()
   await flush()
   assert.deepEqual(
     rpcLog.map((call) => call.endpoint),
@@ -1125,7 +1153,8 @@ test('a failed folder mutation surfaces the host message and re-reads state', as
   expand(view.component(kit()))
   await flush()
   const tree = expand(view.component(kit()))
-  buttonByTitle(tree, '移除').props.onClick()
+  buttonByTitle(tree, '更多操作').props.onClick({ clientX: 12, clientY: 12 })
+  buttonByLabel(expand(view.component(kit())), '移除').props.onClick()
   await flush()
   // One read on open, the mutation, and the read-back after it.
   assert.ok(commandLog.length >= 3, JSON.stringify(commandLog))
@@ -1191,7 +1220,7 @@ test('the browser lists directories and workspace files and opens a chosen file'
     truncated: false,
   }
   const opened = []
-  const { dock, overlay } = await boot({
+  const { hero, overlay } = await boot({
     onRpc: (endpoint, args) => {
       if (endpoint === 'codeWorkspace/browse') return ok(listing)
       if (endpoint === 'codeWorkspace/open') {
@@ -1203,8 +1232,8 @@ test('the browser lists directories and workspace files and opens a chosen file'
       return ok(null)
     },
   })
-  const chip = expand(dock.component(kit()))
-  chip.children[0].props.onClick()
+  const chip = expand(hero.component(kit()))
+  chip.props.onClick()
   await flush()
   // "Open workspace file" starts the browse at the container directory.
   let tree = expand(overlay.component({}))
@@ -1227,7 +1256,7 @@ test('opening a workspace selects it through uiWorkspace when that service exist
     entries: [{ name: 'app.code-workspace', path: 'D:/ws/app.code-workspace', kind: 'workspace-file', hidden: false }],
     truncated: false,
   }
-  const { dock, overlay } = await boot({
+  const { hero, overlay } = await boot({
     services: {
       uiWorkspace: {
         openWorkspace(id) {
@@ -1246,7 +1275,7 @@ test('opening a workspace selects it through uiWorkspace when that service exist
       return ok(null)
     },
   })
-  expand(dock.component(kit())).children[0].props.onClick()
+  expand(hero.component(kit())).props.onClick()
   await flush()
   buttonByLabel(expand(overlay.component({})), '切换文件').props.onClick()
   await flush()
@@ -1317,7 +1346,7 @@ test('apply survives a composition with no optional services at all', async () =
   assert.equal(harness.triggers.length, 1)
   // Rendering the components with bare props must not throw.
   assert.ok(harness.slot('conversation.session.header.actions').component({}))
-  assert.equal(harness.slot('conversation.input.dock').component({}), null)
+  assert.ok(harness.slot('conversation.hero.options').component({}), 'the row chip renders without any session kit')
   assert.equal(harness.slot('shell.overlay').component({}), null)
 })
 
@@ -1346,7 +1375,8 @@ test('the page lists every detected family editor and opens the workspace throug
   let tree = expand(view.component(kit()))
   await flush()
   tree = expand(view.component(kit()))
-  assert.match(textOf(tree), /在编辑器中打开/)
+  const editorGroup = nodesWhere(tree, (node) => node.props && node.props['aria-label'] === '在编辑器中打开')[0]
+  assert.ok(editorGroup, 'the editor buttons carry the group label')
   const button = buttonByLabel(tree, 'VS Code')
   assert.ok(button, 'a button per detected editor must exist')
   // The tooltip names the executable and the target the host will use.
@@ -1699,7 +1729,6 @@ test('the folder rows offer a DSH terminal shortcut only when the terminal servi
   await flush()
   const bare = expand(plain.view.component(kit()))
   assert.equal(buttonsIn(bare).filter((button) => textOf(button) === '>_').length, 0, 'no terminal services, no shortcut')
-  assert.doesNotMatch(textOf(bare), /内置终端按会话提供/, 'the hint also belongs to the terminal services')
 })
 
 test('the primary folder opens a terminal without a cd and titles it after the project', async () => {
@@ -1912,26 +1941,6 @@ test('a missing folder disables its terminal shortcut instead of opening it', as
   assert.equal(terminals.calls.openTab.length, 0)
 })
 
-test('the sessionless panel explains where the terminal shortcut lives', async () => {
-  const terminals = terminalStub()
-  const { dock, panel } = await boot({
-    services: terminals.services,
-    onRpc: (endpoint) => {
-      if (endpoint === 'codeWorkspace/open') return ok(STATE)
-      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
-      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
-      return ok(STATE)
-    },
-  })
-  expand(dock.component(kit())).children[0].props.onClick()
-  await flush()
-  expand(panel.component({}))
-  await flush()
-  const tree = expand(panel.component({}))
-  assert.match(textOf(tree), /内置终端按会话提供/)
-  assert.equal(buttonsIn(tree).filter((button) => textOf(button) === '>_').length, 0)
-})
-
 // ------------------------------------------------ the redesigned page (spec §8.1)
 
 test('the page is headed by the workspace file name, and the one-time tab explainer is gone', async () => {
@@ -2005,7 +2014,8 @@ test('removing a folder asks first, then issues the indexed remove', async () =>
   const { view, commandLog, confirmations } = await boot()
   expand(view.component(kit()))
   await flush()
-  buttonByTitle(expand(view.component(kit())), '移除').props.onClick()
+  buttonByTitle(expand(view.component(kit())), '更多操作').props.onClick({ clientX: 12, clientY: 12 })
+  buttonByLabel(expand(view.component(kit())), '移除').props.onClick()
   await flush()
   assert.equal(confirmations.length, 1, 'the destructive row action must be confirmed')
   assert.match(confirmations[0], /移除「ws」/)
@@ -2044,4 +2054,130 @@ test('paths are copyable and every icon-only control carries a tooltip and an ac
       assert.ok(button.props['aria-label'], 'the ' + glyph + ' control must have an accessible name')
     }
   }
+})
+
+// --------------------------------------- the workspace file tree (every root)
+
+test('the explorer offers every root, and expanding one asks the host for its listing', async () => {
+  const requests = []
+  const { view } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      if (endpoint === 'codeWorkspace/tree') {
+        requests.push(args)
+        return ok({ path: args.path, entries: [], truncated: false })
+      }
+      return ok(null)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+
+  // One list, both roots. The second one is the whole point: it lies outside the
+  // session root, so the shipped single-root Files page can never list it.
+  const rows = nodesWhere(tree, (node) => node.props && typeof node.props['data-root-path'] === 'string')
+  const paths = rows.map((row) => row.props['data-root-path'])
+  assert.ok(paths.includes('D:/ws'), 'the primary root must be a row')
+  assert.ok(paths.includes('D:/other'), 'the additional root must be a row')
+
+  const toggle = nodesWhere(tree, (node) => node.props && node.props['data-root-toggle'] === 'D:/other')[0]
+  assert.ok(toggle, 'the additional root must be expandable')
+  toggle.props.onClick()
+  await flush()
+  assert.deepEqual(requests, [{ path: 'D:/other' }], JSON.stringify(requests))
+})
+
+test('a one-folder workspace with no workspace file still gets the tree, read-only', async () => {
+  // A workspace file is what DECLARES several folders, not what makes a folder
+  // browsable: this session is rooted at D:/solo with no file associated, and the
+  // page is the only place its code can be looked at.
+  const bare = {
+    rootDir: 'D:/solo',
+    fileDir: null,
+    file: null,
+    title: null,
+    exists: false,
+    roots: [],
+    warnings: [],
+    error: null,
+    extraRoots: [],
+    conflict: [],
+    indent: '\t',
+  }
+  const requests = []
+  const { view } = await boot({
+    onCommand: () => commandOk(bare),
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/tree') {
+        requests.push(args)
+        return ok({ path: args.path, entries: [], truncated: false })
+      }
+      return ok(bare)
+    },
+  })
+  const props = kit({ useSessions: (selector) => selector({ byId: { 'session-1': { cwd: 'D:/solo', composerPhase: 'blank', openState: 'open' } } }) })
+  expand(view.component(props))
+  await flush()
+  const tree = expand(view.component(props))
+
+  // The card still says there is no workspace file, and the folder is below it.
+  assert.match(textOf(tree), /未关联 \.code-workspace 文件/)
+  assert.match(textOf(tree), /工作区文件夹/)
+  const row = nodesWhere(tree, (node) => node.props && node.props['data-root-path'] === 'D:/solo')[0]
+  assert.ok(row, 'the session root must be the one folder in the tree — text: ' + textOf(tree))
+  assert.match(textOf(row), /主目录/)
+
+  // Expanding it asks the host for the directory — the same listing the
+  // multi-root tree uses, so browsing does not depend on a workspace file.
+  nodesWhere(row, (node) => node.props && node.props['data-root-toggle'] === 'D:/solo')[0].props.onClick()
+  await flush()
+  assert.deepEqual(requests, [{ path: 'D:/solo' }], JSON.stringify(requests))
+
+  // Nothing here may offer to edit the folder list: every such action writes the
+  // workspace file, and this workspace has none.
+  assert.doesNotMatch(textOf(tree), /新增文件夹/)
+  buttonByTitle(expand(view.component(props)), '更多操作').props.onClick({ clientX: 8, clientY: 8 })
+  await flush()
+  const menu = expand(view.component(props))
+  assert.match(textOf(menu), /在资源管理器中显示/, 'the read-only row keeps the reveal action')
+  assert.doesNotMatch(textOf(menu), /重命名/)
+  assert.doesNotMatch(textOf(menu), /移除/)
+  assert.equal(nodesWhere(menu, (node) => node.props && node.props.title === '拖动排序').length, 0, 'no drag handle without a file')
+})
+
+test('the folder row puts its caret on the column the tree measures from', async () => {
+  // The tree used to be laid out from its own `depth` alone, so a child row
+  // started LEFT of the folder row that owns it and the nesting read backwards.
+  // Both halves now share one ladder: the folder row's caret sits at
+  // 10 (inset) + 12 (grip) + 6 (gap) = 28, the folder body is inset to 22 and
+  // each tree row adds 6, so a first-level row starts on that same 28 and adds a
+  // 16px guide cell per level from there (see TreeNode: 28 → 44 caret → 84 name).
+  // A re-render here cannot open the tree — the harness' `useState` is inert — so
+  // this pins the folder side of the ladder, the side a render pass reaches.
+  const single = {
+    rootDir: 'D:/ws',
+    fileDir: 'D:/ws',
+    file: 'D:/ws/app.code-workspace',
+    title: 'app',
+    exists: true,
+    roots: [{ index: 0, path: '.', name: null, label: 'ws', resolvedPath: 'D:/ws', exists: true, isPrimary: true, relative: '.' }],
+    warnings: [],
+    error: null,
+    extraRoots: [],
+    conflict: [],
+    indent: '\t',
+  }
+  const { view } = await boot({ onCommand: () => commandOk(single), onRpc: () => ok(single) })
+  const props = kit({ useSessions: (selector) => selector({ byId: { 'session-1': { cwd: 'D:/ws', composerPhase: 'blank', openState: 'open' } } }), rootDir: 'D:/ws' })
+  expand(view.component(props))
+  await flush()
+  const tree = expand(view.component(props))
+
+  const row = nodesWhere(tree, (node) => node.props && node.props['data-root-path'] === 'D:/ws')[0]
+  assert.ok(row, 'the folder row must render')
+  assert.equal(row.props.style.padding, '4px 10px')
+  assert.equal(row.props.style.gap, 6, 'the 6px gap is what puts the caret at 28, the column the tree starts from')
+  assert.equal(nodesWhere(row, (node) => node.props && node.props.title === '展开').length, 1, 'the row keeps its caret')
 })

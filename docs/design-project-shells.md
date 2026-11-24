@@ -114,8 +114,8 @@ const handle = await subprocess.spawnTerminal({
 | 组合 | 表现 |
 | --- | --- |
 | 没有右侧栏 / 终端插件（组合被裁剪） | 功能整体不出现；面板其余部分照旧（与现有「没有 primitives 就跳过 Open In… 接管」同一姿态） |
-| 左栏无会话页（`main` 面板） | 不显示按钮；在 roots 标题下加一行提示：「内置终端按会话提供：在对话页的『代码工作区』页签里，每个项目行会多一个打开终端的按钮。」 |
-| 新建会话页浮层 | 同上（无会话） |
+| 左栏无会话页（`main` 面板） | 这一页现在只画管理器列表，不再有文件夹行，所以既没有终端按钮也没有「按会话提供」的提示——提示随文件夹区一起删掉了 |
+| 新建会话页浮层 | 这一页有一个（空白）会话 id，行上照常给终端按钮 |
 | 终端数量达到上限 | 面板 notice：「终端数量已达上限，请先关闭不用的终端（已退出的终端也占用配额）。」 |
 | 打开失败（无 shell / PTY 失败 / 会话面缺失） | 面板 notice 显示本地化原因；不静默吞掉 |
 | 目录不存在 | 按钮禁用，不点击 |
@@ -240,7 +240,6 @@ click(row)
 | --- | --- | --- |
 | `action.openTerminal` | 在 DSH 终端中打开 | Open in DSH terminal |
 | `action.openTerminalBusy` | 正在打开终端… | Opening terminal… |
-| `hint.terminalSession` | 内置终端按会话提供：在对话页的「代码工作区」页签里，每个项目行会多一个打开终端的按钮。 | Terminals are session-scoped: open the Code Workspace tab in a conversation and each project row gains a terminal button. |
 | `hint.terminalNoDir` | 目录不存在，无法打开终端。 | The directory does not exist, so no terminal can be opened. |
 | `notice.terminalOpened` | 已在 DSH 终端中打开「{name}」。 | Opened “{name}” in a DSH terminal. |
 | `notice.terminalFocused` | 已切换到「{name}」的终端。 | Focused the “{name}” terminal. |
@@ -293,7 +292,7 @@ sidebarRightTabs: { get: (kind) => kind === 'terminal' ? { kind } : undefined, s
 新增用例（约 12 个）：
 
 1. 有会话 + 服务齐全时，每个 folder 行出现 `在 DSH 终端中打开` 按钮；无服务/无会话时不出现，且面板其余部分不坏。
-2. 无会话的左栏面板不渲染按钮，并显示 `hint.terminalSession`。
+2. 左栏管理器页没有文件夹行，因此既无按钮也无提示（该用例随 `hint.terminalSession` 一起删除）。
 3. 点击主根：`openTab('terminal')` 被调用一次；`view` 收到 `(session-1, tabId, contentId)`；**不写 `cd`**；`rename` 用项目名。
 4. 点击附加根（PowerShell）：可写后写入 `Set-Location -LiteralPath 'D:/other'` + `\r`。
 5. 引号表：路径含空格/单引号/中文时三种 shell 各自的转义。

@@ -262,7 +262,7 @@ test('apply registers the prompt section, the command, the service and the remot
   assert.deepEqual(methods, [
     'state', 'recent', 'forgetFile', 'open', 'forget', 'useFile', 'create',
     'addFolder', 'removeFolder', 'renameFolder', 'moveFolder',
-    'browse', 'makeDir', 'pick', 'pickFile', 'reveal', 'editors', 'editorIcon',
+    'browse', 'tree', 'makeDir', 'pick', 'pickFile', 'reveal', 'editors', 'editorIcon',
     'openInEditor', 'listFiles',
   ])
   for (const invocation of b.remoteContribution.invocations) {
