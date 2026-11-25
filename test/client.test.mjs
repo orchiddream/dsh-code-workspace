@@ -2155,6 +2155,322 @@ test('a one-folder workspace with no workspace file still gets the tree, read-on
   assert.equal(nodesWhere(menu, (node) => node.props && node.props.title === '拖动排序').length, 0, 'no drag handle without a file')
 })
 
+// ------------------------------------ file operations from the workspace tree
+// The tree is a browser AND a file manager: a file or directory row carries the
+// operations that act on the disk (new child, rename, delete). They are not
+// folder-list actions — they never write the `.code-workspace` file — so they
+// are offered in the one-folder case as well; that case is covered by the
+// read-only test above, which pins the folder-list half staying absent.
+
+const TREE_LISTINGS = {
+  'D:/ws': [
+    { name: 'docs', path: 'D:/ws/docs', kind: 'directory', hidden: false },
+    { name: 'a.md', path: 'D:/ws/a.md', kind: 'file', hidden: false },
+  ],
+  'D:/ws/docs': [{ name: 'b.md', path: 'D:/ws/docs/b.md', kind: 'file', hidden: false }],
+}
+
+/** Boot the panel, expand the primary root, and hand back a render function. */
+async function openFileTree(listings = TREE_LISTINGS) {
+  const { view, rpcLog } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      if (endpoint === 'codeWorkspace/tree') {
+        return ok({ path: args.path, entries: listings[args.path] || [], truncated: false })
+      }
+      return ok(null)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  const tree = expand(view.component(kit()))
+  nodesWhere(tree, (node) => node.props && node.props['data-root-toggle'] === 'D:/ws')[0].props.onClick()
+  await flush()
+  return { rpcLog, render: () => expand(view.component(kit())) }
+}
+
+/** The row a path addresses, as the button that carries it. */
+function treeRow(tree, path) {
+  return nodesWhere(tree, (node) => node.type === 'button' && node.props && node.props.title === path && node.props['data-depth'] !== undefined)[0]
+}
+
+/** Right-click one tree row, then re-render. */
+function openRowMenu(render, path) {
+  const row = treeRow(render(), path)
+  assert.ok(row, 'the tree must render a row for ' + path)
+  row.props.onContextMenu({ type: 'contextmenu', clientX: 24, clientY: 24, preventDefault() {} })
+  return render()
+}
+
+test('a file tree row opens the file operations menu', async () => {
+  const { render } = await openFileTree()
+  const menu = openRowMenu(render, 'D:/ws/a.md')
+  const text = textOf(menu)
+  // A file cannot hold anything: its create actions say "sibling" out loud.
+  for (const label of ['新建同级文件', '新建同级文件夹', '重命名', '在资源管理器中显示', '删除']) {
+    assert.match(text, new RegExp(label), 'the row menu offers ' + label + ' — text: ' + text)
+  }
+  // The menu is anchored at the pointer, not at the left edge of the page.
+  const node = nodesWhere(menu, (entry) => entry.props && entry.props['data-cws-menu'] === 'true')[0]
+  assert.equal(node.props.style.left, 24)
+  assert.equal(node.props.style.top, 24)
+})
+
+test('a directory row creates its child in that directory', async () => {
+  const { render, rpcLog } = await openFileTree()
+  let tree = openRowMenu(render, 'D:/ws/docs')
+  buttonByLabel(tree, '新建文件夹').props.onClick()
+  // Expanding the directory to show its first child is part of opening the field.
+  await flush()
+  tree = render()
+
+  // The field appears UNDER the directory and is the row the entry will occupy.
+  const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-entry')
+  assert.ok(field, 'the inline name field must appear — text: ' + textOf(tree))
+  assert.equal(field.props.placeholder, '例如 第一章')
+  assert.equal(field.props.autoFocus, true, 'the field takes focus when it opens')
+  // A directory's new entry is its first child, so the field is first.
+  const flat = nodesWhere(tree, () => true)
+  const nested = flat.indexOf(treeRow(tree, 'D:/ws/docs/b.md'))
+  const createRow = flat.findIndex((node) => node.props && node.props['data-create-row'] === 'directory')
+  assert.ok(createRow >= 0 && createRow < nested, 'the field leads the directory’s rows — field ' + createRow + ', first entry ' + nested)
+
+  field.props.onChange({ target: { value: 'chapter-1' } })
+  tree = render()
+  // Enter is the advertised submit; the field itself must carry it, not only the
+  // button, because the field is what has focus.
+  field.props.onKeyDown({ key: 'Enter' })
+  await flush()
+
+  const create = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/createFolder')
+  assert.ok(create, JSON.stringify(rpcLog))
+  assert.equal(create.args.rootDir, 'D:/ws')
+  assert.equal(create.args.parent, 'D:/ws/docs')
+  assert.equal(create.args.name, 'chapter-1')
+  assert.equal(create.args.sessionId, 'session-1')
+  assert.match(textOf(render()), /已创建文件夹「chapter-1」/)
+})
+
+test('escape closes the inline field without a request', async () => {
+  const { render, rpcLog } = await openFileTree()
+  let tree = openRowMenu(render, 'D:/ws/docs')
+  buttonByLabel(tree, '新建文件').props.onClick()
+  tree = render()
+  const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-entry')
+  field.props.onKeyDown({ key: 'Escape' })
+  tree = render()
+  assert.equal(inputsIn(tree).filter((input) => input.props['data-field'] === 'create-entry').length, 0)
+  assert.equal(rpcLog.some((entry) => entry.endpoint === 'codeWorkspace/createFile'), false)
+})
+
+test('creating at the root keeps the rest of the tree expanded', async () => {
+  // A create only changes ONE directory's listing. Forgetting the expansion of
+  // its descendants would fold every folder the user had open.
+  const listings = {
+    'D:/ws': [
+      { name: 'docs', path: 'D:/ws/docs', kind: 'directory', hidden: false },
+      { name: 'a.md', path: 'D:/ws/a.md', kind: 'file', hidden: false },
+    ],
+    'D:/ws/docs': [{ name: 'b.md', path: 'D:/ws/docs/b.md', kind: 'file', hidden: false }],
+  }
+  const { view, rpcLog } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      if (endpoint === 'codeWorkspace/tree') return ok({ path: args.path, entries: listings[args.path] || [], truncated: false })
+      return ok(null)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  let tree = expand(view.component(kit()))
+  nodesWhere(tree, (node) => node.props && node.props['data-root-toggle'] === 'D:/ws')[0].props.onClick()
+  await flush()
+  tree = expand(view.component(kit()))
+  treeRow(tree, 'D:/ws/docs').props.onClick()
+  await flush()
+  tree = expand(view.component(kit()))
+  assert.ok(treeRow(tree, 'D:/ws/docs/b.md'), 'the nested row starts out visible')
+
+  // Create at the root through the folder row's own menu.
+  buttonByTitle(tree, '更多操作').props.onClick({ clientX: 8, clientY: 8 })
+  tree = expand(view.component(kit()))
+  buttonByLabel(tree, '新建文件夹').props.onClick()
+  await flush()
+  tree = expand(view.component(kit()))
+  const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-entry')
+  field.props.onChange({ target: { value: 'drafts' } })
+  tree = expand(view.component(kit()))
+  buttonByLabel(tree, '创建').props.onClick()
+  await flush()
+
+  tree = expand(view.component(kit()))
+  assert.ok(rpcLog.some((entry) => entry.endpoint === 'codeWorkspace/createFolder'))
+  assert.ok(treeRow(tree, 'D:/ws/docs/b.md'), 'the open subtree must survive a create at the root')
+})
+
+test('renaming an expanded directory carries its subtree to the new path', async () => {
+  // The contents did not change, only the prefix: the cached listing and the
+  // open flag move with it instead of collapsing the directory.
+  const listings = {
+    'D:/ws': [
+      { name: 'docs', path: 'D:/ws/docs', kind: 'directory', hidden: false },
+      { name: 'a.md', path: 'D:/ws/a.md', kind: 'file', hidden: false },
+    ],
+    'D:/ws/docs': [{ name: 'b.md', path: 'D:/ws/docs/b.md', kind: 'file', hidden: false }],
+    'D:/ws/archive': [{ name: 'b.md', path: 'D:/ws/archive/b.md', kind: 'file', hidden: false }],
+  }
+  const { view, rpcLog } = await boot({
+    onRpc: (endpoint, args) => {
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      if (endpoint === 'codeWorkspace/tree') return ok({ path: args.path, entries: listings[args.path] || [], truncated: false })
+      if (endpoint === 'codeWorkspace/renameEntry') {
+        // The disk now holds `archive`, so the parent's re-list says so.
+        listings['D:/ws'] = [
+          { name: 'archive', path: 'D:/ws/archive', kind: 'directory', hidden: false },
+          { name: 'a.md', path: 'D:/ws/a.md', kind: 'file', hidden: false },
+        ]
+        return ok({ changed: true, from: 'D:/ws/docs', path: 'D:/ws/archive', parent: 'D:/ws' })
+      }
+      return ok(null)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  let tree = expand(view.component(kit()))
+  nodesWhere(tree, (node) => node.props && node.props['data-root-toggle'] === 'D:/ws')[0].props.onClick()
+  await flush()
+  tree = expand(view.component(kit()))
+  treeRow(tree, 'D:/ws/docs').props.onClick()
+  await flush()
+  tree = expand(view.component(kit()))
+  assert.ok(treeRow(tree, 'D:/ws/docs/b.md'))
+
+  const row = treeRow(tree, 'D:/ws/docs')
+  row.props.onContextMenu({ type: 'contextmenu', clientX: 20, clientY: 20, preventDefault() {} })
+  tree = expand(view.component(kit()))
+  buttonByLabel(tree, '重命名').props.onClick()
+  tree = expand(view.component(kit()))
+  const nameField = inputsIn(tree).find((input) => input.props['data-field'] === 'rename-entry')
+  nameField.props.onChange({ target: { value: 'archive' } })
+  tree = expand(view.component(kit()))
+  buttonByLabel(tree, '确定').props.onClick()
+  await flush()
+
+  tree = expand(view.component(kit()))
+  assert.ok(rpcLog.some((entry) => entry.endpoint === 'codeWorkspace/renameEntry'))
+  assert.ok(treeRow(tree, 'D:/ws/archive'), 'the renamed row is listed — text: ' + textOf(tree))
+  assert.ok(treeRow(tree, 'D:/ws/archive/b.md'), 'its subtree is still expanded under the new path')
+})
+
+test('the workspace file row cannot rename or delete itself, and says why', async () => {
+  const listings = {
+    'D:/ws': [
+      { name: 'app.code-workspace', path: 'D:/ws/app.code-workspace', kind: 'file', hidden: false },
+      { name: 'a.md', path: 'D:/ws/a.md', kind: 'file', hidden: false },
+    ],
+  }
+  const { render } = await openFileTree(listings)
+  const menu = openRowMenu(render, 'D:/ws/app.code-workspace')
+  const rename = buttonByLabel(menu, '重命名')
+  const remove = buttonByLabel(menu, '删除')
+  assert.equal(rename.props.disabled, true)
+  assert.equal(remove.props.disabled, true)
+  assert.match(String(rename.props.title || ''), /工作区文件/)
+})
+
+
+test('a file row creates a sibling and renames in place', async () => {
+  const { render, rpcLog } = await openFileTree()
+  let tree = openRowMenu(render, 'D:/ws/a.md')
+  buttonByLabel(tree, '新建同级文件').props.onClick()
+  tree = render()
+  const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-entry')
+  assert.ok(field, 'a file creates beside itself — text: ' + textOf(tree))
+  // The field follows the file it was asked from, not the top of the directory:
+  // same level, but exactly where the new entry will land.
+  const flat = nodesWhere(tree, () => true)
+  const anchor = flat.indexOf(treeRow(tree, 'D:/ws/a.md'))
+  const createRow = flat.findIndex((node) => node.props && node.props['data-create-row'] === 'file')
+  assert.ok(anchor >= 0 && createRow > anchor, 'the field sits under the file row — anchor ' + anchor + ', field ' + createRow)
+  field.props.onChange({ target: { value: 'notes.md' } })
+  tree = render()
+  buttonByLabel(tree, '创建').props.onClick()
+  await flush()
+  const create = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/createFile')
+  assert.ok(create, JSON.stringify(rpcLog))
+  assert.equal(create.args.parent, 'D:/ws', 'the sibling’s directory is the file’s parent')
+  assert.equal(create.args.name, 'notes.md')
+
+  // Rename: the row's name becomes a field pre-filled with the current name.
+  tree = openRowMenu(render, 'D:/ws/a.md')
+  buttonByLabel(tree, '重命名').props.onClick()
+  tree = render()
+  const nameField = inputsIn(tree).find((input) => input.props['data-field'] === 'rename-entry')
+  assert.ok(nameField, 'the row turns into a field — text: ' + textOf(tree))
+  assert.equal(nameField.props.value, 'a.md')
+  nameField.props.onChange({ target: { value: 'b.md' } })
+  tree = render()
+  buttonByLabel(tree, '确定').props.onClick()
+  await flush()
+  const rename = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/renameEntry')
+  assert.ok(rename, JSON.stringify(rpcLog))
+  assert.equal(rename.args.path, 'D:/ws/a.md')
+  assert.equal(rename.args.name, 'b.md')
+  assert.match(textOf(render()), /已重命名为「b.md」/)
+})
+
+test('deleting asks in the page, names the target, and can be cancelled', async () => {
+  const { render, rpcLog } = await openFileTree()
+  let tree = openRowMenu(render, 'D:/ws/docs')
+  buttonByLabel(tree, '删除').props.onClick()
+  tree = render()
+
+  const dialog = nodesWhere(tree, (node) => node.props && node.props.role === 'alertdialog')[0]
+  assert.ok(dialog, 'deleting must confirm in the page, not with window.confirm — text: ' + textOf(tree))
+  assert.match(textOf(dialog), /删除文件夹「docs」及其全部内容/)
+
+  // Cancel answers nothing at all.
+  buttonByLabel(dialog, '取消').props.onClick()
+  tree = render()
+  assert.equal(nodesWhere(tree, (node) => node.props && node.props.role === 'alertdialog').length, 0)
+  assert.equal(rpcLog.some((entry) => entry.endpoint === 'codeWorkspace/removeEntry'), false)
+
+  // Confirming deletes that path; the notice names it.
+  tree = openRowMenu(render, 'D:/ws/docs')
+  buttonByLabel(tree, '删除').props.onClick()
+  tree = render()
+  const confirmed = nodesWhere(tree, (node) => node.props && node.props.role === 'alertdialog')[0]
+  buttonsIn(confirmed).find((button) => textOf(button) === '删除').props.onClick()
+  await flush()
+  const remove = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/removeEntry')
+  assert.ok(remove, JSON.stringify(rpcLog))
+  assert.equal(remove.args.path, 'D:/ws/docs')
+  assert.match(textOf(render()), /已删除「docs」/)
+})
+
+test('a folder row can create at the workspace root', async () => {
+  // The root row is a directory too, and the only way to make a top-level file.
+  const { render, rpcLog } = await openFileTree()
+  let tree = render()
+  buttonByTitle(tree, '更多操作').props.onClick({ clientX: 8, clientY: 8 })
+  tree = render()
+  assert.match(textOf(tree), /新建文件/, 'the folder menu grows the two create actions')
+  buttonByLabel(tree, '新建文件').props.onClick()
+  await flush()
+  tree = render()
+  const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-entry')
+  assert.ok(field, 'the root-level field appears under the folder row — text: ' + textOf(tree))
+  field.props.onChange({ target: { value: 'readme.md' } })
+  tree = render()
+  buttonByLabel(tree, '创建').props.onClick()
+  await flush()
+  const create = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/createFile')
+  assert.ok(create, JSON.stringify(rpcLog))
+  assert.equal(create.args.parent, 'D:/ws')
+  assert.equal(create.args.name, 'readme.md')
+})
+
+
 test('the new-workspace-file button opens an inline name field, not a prompt', async () => {
   // `window.prompt` does not exist in the Desktop renderer, so the old button
   // threw and looked dead. The form is a store flag plus a field now, and the

@@ -21,6 +21,7 @@
 | 多根窗口 | 会话根 = `folders[]` 里**第一个在磁盘上存在的目录**；其余 folder 全部作为附加根，文件自己的目录只表示文件放在哪 |
 | 从 Harness 打开窗口 | 用 `.code-workspace` 文件本身启动编辑器：`Code.exe <文件>` / `Trae CN.exe <文件>`，这正是 VS Code 家族「打开这个多根工作区」的 CLI 约定；官方「Open In…」路由做不到——它只接受**目录** |
 | 每个文件夹的终端 | 面板里每个 folder 行一个 `>_` 按钮：交给 DSH **自带**的右侧栏终端（不是外部窗口），标签名是项目名；附加根会在终端里自动 `cd` 进去——终端创建接口没有 cwd |
+| 在资源管理器里新建 / 重命名 / 删除 | 文件树行右键：新建落在该目录（右键文件行则落在它旁边），重命名是行内输入，删除先在页面内确认；范围限于工作区的根，且从不写 `.code-workspace` 文件 |
 | `.code-workspace` 损坏 | 面板显示具体行列号；此时不授予任何根（fail closed） |
 
 DSH 的工作区是**单根目录**，`workspaceRegistry.create()` 也只接受存在的目录，所以插件**从文件推导**会话根：磁盘上第一个存在的 folder；一个都不存在时才退回文件自己的目录。
@@ -175,12 +176,13 @@ node tools/profile-link.mjs uninstall --profile desktop --package dsh-plugin-ope
 
 详情主体（对话视图与浮层）显示：工作区文件路径、它推导出的**工作区根目录**、当它与该根不同时的**文件所在目录**、每个 folder（显示名、真实路径、主目录/不存在标记），以及当这个根被多个文件命名时的「同一主目录的其它工作区文件」区块（每个文件一行、可点击切换）。操作有：
 
-- **文件夹行**：显示名、真实路径、主目录/不存在标记，以及一个 `>_` 终端入口。展开它就就地列出该目录的文件；上移 / 下移、重命名、在资源管理器中显示、移除都在这一行的右键菜单里（右键，或点 `⋯` 按钮）
+- **文件夹行**：显示名、真实路径、主目录/不存在标记，以及一个 `>_` 终端入口。展开它就就地列出该目录的文件；上移 / 下移、重命名显示名、在资源管理器中显示、移除都在这一行的右键菜单里（右键，或点 `⋯` 按钮）。**显示名**只是 `.code-workspace` 里的 `name`；要改磁盘上的目录名，用下面树行里的「重命名」
+- **文件树行**：右键任意文件或目录，可以**新建文件 / 新建文件夹**、**重命名**、**在资源管理器中显示**、**删除**。在**目录**上新建时，输入框出现在该目录的第一行（新条目就是它的子项）；在**文件**上新建时菜单写的是「新建同级文件 / 同级文件夹」，输入框紧跟在该文件下方——文件不能装东西，所以新条目只能是它的同级，位置和文案都把这件事说清楚。重命名把名称列换成输入框（Enter 确认，Esc 取消）；删除先在页面内确认并写明目标（目录会连同内容一起删），确认后直接删，不进回收站
 - **添加文件夹**：`＋ 新增文件夹` 在「工作区文件夹」分区标题的右端，点开后在标题与列表之间出现路径输入框和可选的显示名；不存在或不是目录会被拒绝
 - **在编辑器中打开**：本机能证明存在的每个 VS Code 家族编辑器一个按钮，位于卡片标题行（见下）
 - **切换文件** / **最近使用** / **新建工作区文件** / **取消关联**：前三个打开的分区就在触发它们的动作行下面（原先渲染在整页末尾、折叠线以下，看起来像按了没反应的按钮）；**新建工作区文件** 改成内联的名称输入框，不再用浏览器 `prompt`——桌面版的渲染进程没有 `prompt()`，旧代码在那里直接抛错，按钮等于死的
 
-**没有 `.code-workspace` 文件时也照样有树。** 工作区文件只决定「有几个根」，不决定「能不能看代码」：一个会话根就是一个单文件夹工作区，所以这一页照样把它作为「工作区文件夹」里的一行，展开就是目录树，点文件在右侧栏预览。这一行是**只读**的：`⋯` 里保留「在资源管理器中显示」（有会话时还有终端入口），但没有上移 / 下移 / 重命名 / 移除，也没有拖动手柄和「新增文件夹」——那些动作写的是工作区文件，而没有文件可写。
+**没有 `.code-workspace` 文件时也照样有树。** 工作区文件只决定「有几个根」，不决定「能不能看代码」：一个会话根就是一个单文件夹工作区，所以这一页照样把它作为「工作区文件夹」里的一行，展开就是目录树，点文件在右侧栏预览。**文件夹列表**这一半是**只读**的：`⋯` 里没有上移 / 下移 / 重命名显示名 / 移除，也没有拖动手柄和「新增文件夹」——那些动作写的是工作区文件，而没有文件可写。文件级的操作不写工作区文件，所以**树行上的新建 / 重命名 / 删除在这个模式里照样可用**（只受「不能出这个工作区」限制）。
 
 #### 管理器页（左栏入口）
 
@@ -328,13 +330,13 @@ DSH 里一个 Workspace 的身份就是它根目录 `realpath` 规范化后的�
 | 编辑器家族 | `lib/editor.js` | 本机装了哪些 VS Code 家族编辑器（一律先证明、不假设）、Electron 编辑器需要的子进程环境、以及「启动成功」与「编辑器存活」解耦的启动逻辑 |
 | 编辑器图标 | `lib/editor-icon.js` | 官方没有图标路由的家族成员，从可执行文件提取关联图标；产物校验不通过就当作没有 |
 | 文件对话框 | `lib/workspace-picker.js` | 用**主机自己的文件对话框**选 `.code-workspace`——宿主那个只认目录的选择器 seam 的文件版兄弟；三种结果（picked / cancelled / unavailable）、runner 可注入、任何测试都不会真弹对话框 |
-| 宿主 | `lib/index.js` | 发现与缓存、`tools/execute` 重根拦截、提示词注入、通知、`/code-workspace` 命令、无会话 `codeWorkspace/*` 远程 API、`@` 发现、编辑器与文件对话框端点 |
-| 客户端 | `lib/client.js` | 左栏入口与它打开的无会话中央面板、`conversation.view` 的页签本体、仅在降级组合里出现的会话头部按钮、新建会话页行内胶囊（`conversation.hero.options`）与它的浮层面板、「Open In…」接管、`@` 同伴分组、每个 folder 行的内置终端快捷按钮、树行与 folder 行的「⤴ 引用到对话」（把 `@路径` 写进草稿），以及打开预览时把高度让给树的详情折叠 |
+| 宿主 | `lib/index.js` | 发现与缓存、`tools/execute` 重根拦截、提示词注入、通知、`/code-workspace` 命令、无会话 `codeWorkspace/*` 远程 API（含树上的新建 / 重命名 / 删除，带工作区范围校验）、`@` 发现、编辑器与文件对话框端点 |
+| 客户端 | `lib/client.js` | 左栏入口与它打开的无会话中央面板、`conversation.view` 的页签本体、仅在降级组合里出现的会话头部按钮、新建会话页行内胶囊（`conversation.hero.options`）与它的浮层面板、「Open In…」接管、`@` 同伴分组、每个 folder 行的内置终端快捷按钮、树行与 folder 行的右键菜单（含新建 / 重命名 / 删除与页内删除确认）、树行与 folder 行的「⤴ 引用到对话」（把 `@路径` 写进草稿），以及打开预览时把高度让给树的详情折叠 |
 
 - **发现**：会话根为 `C` 时，当前文件依次是（1）**本会话**选过的文件；（2）`C` 最近的一条显式记录——若那条是墓碑则到此为止；（3）**自动采用**：`C` 下恰好一个 `.code-workspace`；（4）什么都没有，此时插件对该会话完全失效。两个及以上候选视为歧义（fail closed）。旧规则「记录里目录等于 `C` 的那个文件」已经删掉：一个目录里有多个文件时，它返回的是碰巧先被记录的那个。
 - **缓存**：模型 2s、目录发现 3s、`@` 索引 4s。刻意**不用 `fs.stat` 元数据**做失效判断——`FsInfo` 的字段不属于插件面向的契约，用不靠谱的字段做戳可能永远不变化，把根集合钉死整个会话。面板与命令的读取一律强制重读，所以每次这样的读取都会重算推导出的根；对话视图随页签被选中而挂载、用户离开而卸载，每次挂载读一次就正是「把当前状态给我看」，不再有客户端读窗口或节流。
 - **拦截**：`write` / `edit` / `pwsh` / `bash` 的目标落在附加根内时，用 `{ ...standingPolicy, workspaceRoot: <该根> }` 直接执行，**不改 mode**，所以 `read-only` 依旧拒绝、`workspace-write` 放行、`danger-full-access` 放行。后台命令按同样策略注册到 `ctx.jobs`。
-- **无会话通道**：`ctx.provide('codeWorkspace', api)` + 手写 `src-json` Typert 描述符，按**路径**而非 session id 取参，所以还没有会话的新建会话页也能读写工作区文件。`sessionId` 是可选附加参数（`acceptsUndefined: true`），出现在十一个答案可能取决于「哪个会话问的」的端点上——`state`、`open`、`forget`、`useFile`、`create`、`addFolder`、`removeFolder`、`renameFolder`、`moveFolder`、`openInEditor`、`listFiles`。不带它时答案就是「每个根的关联」，也正是新会话会继承的那一个。
+- **无会话通道**：`ctx.provide('codeWorkspace', api)` + 手写 `src-json` Typert 描述符，按**路径**而非 session id 取参，所以还没有会话的新建会话页也能读写工作区文件。`sessionId` 是可选附加参数（`acceptsUndefined: true`），出现在答案可能取决于「哪个会话问的」端点上——`state`、`open`、`forget`、`useFile`、`create`、`addFolder`、`removeFolder`、`renameFolder`、`moveFolder`、`createFile`、`createFolder`、`renameEntry`、`removeEntry`、`openInEditor`、`listFiles`；四个文件级端点用它来解析会话看到的同一组根。不带它时答案就是「每个根的关联」，也正是新会话会继承的那一个。
 - **状态对象**：`rootDir`、`fileDir`、`file`、`title`、`roots[]`（每项带 `isPrimary`，只有与会话根相同的那一个为 true）、`extraRoots`、`conflict`（同样命名这个根的其它文件），外加 `warnings`、`error`、`indent`。
 - **打开编辑器**：`codeWorkspace/editors` 报告本机能证明的家族（懒解析一次并缓存，SSH 会话直接判空）；`codeWorkspace/openInEditor` 取会话根、解析出该根的工作区文件，然后以 `<编辑器> <文件>`（没有文件时退回 `<编辑器> <会话根目录>`）detached 启动。图标经 `codeWorkspace/editorIcon` 以 data URL 内联返回，因此本插件不需要自己的 HTTP 路由，也就不必再引入 `webServer` / `connection` 依赖。
 - **项目终端**：客户端在 `ctx.inject(['sidebarRight', 'webTerminals', 'sidebarRightTabs'])` 里**软挂**右侧栏与终端服务（缺任一即整个功能不出现），用 `sidebarRight.openTab('terminal')` 分配标签、从 `openTabs` 清单的增量里认领新标签（`openTab` 不返回标签 id），借 `webTerminals.view(sessionId, tabId, contentId)` 等到可写后写入 `cd` 并 `rename` 标签。`cd` 是必须的：上游创建接口没有 cwd，终端永远在会话根启动。项目 → `contentId` 的对应存在浏览器 `localStorage`（`dsh.code-workspace.project-shells.v1`，上限 64 条），不进宿主 store。
@@ -348,13 +350,13 @@ DSH 里一个 Workspace 的身份就是它根目录 `realpath` 规范化后的�
 npm test          # = node --test "test/**/*.test.mjs"
 ```
 
-八个测试文件，共 220 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入）、假的右侧栏与终端服务（标签清单、`openTab`、`view` 全部注入）、可注入的对话框 runner（所以没有任何测试会真的弹出文件选择框），客户端用最小 React shim（hook 单次求值、递归展开函数组件），所以可以直接检查渲染树并模拟点击。
+八个测试文件，共 233 个用例，**不需要 DSH 运行时**：用假的 `fs` seam、假的 `systemPrompt`、假 `commands`、假 `shell`/`jobs`、假编辑器宿主机（注册表、`PATH`、文件集全部注入）、假的右侧栏与终端服务（标签清单、`openTab`、`view` 全部注入）、可注入的对话框 runner（所以没有任何测试会真的弹出文件选择框），客户端用最小 React shim（hook 单次求值、递归展开函数组件），所以可以直接检查渲染树并模拟点击。
 
 ```bash
 node test/jsonc.test.mjs              # 25 —— JSONC 解析与注释保留改写
 node test/workspace-file.test.mjs     # 24 —— VS Code 路径规则、folders 增删改、推导会话根
-node test/host.test.mjs               # 50 —— 发现、store、拦截重根、拒绝、命令、远程 API、@ 发现、编辑器守卫
-node test/client.test.mjs             # 78 —— bundle 契约、槽位注册、面板交互与重构后的页面/组件、重复根区块、Open In… 接管、@ 源、项目终端快捷按钮与标签认领、引用到草稿、详情折叠、头部的新增入口、文件类型图标
+node test/host.test.mjs               # 54 —— 发现、store、拦截重根、拒绝、命令、远程 API、@ 发现、编辑器守卫、文件级操作及其范围
+node test/client.test.mjs             # 87 —— bundle 契约、槽位注册、面板交互与重构后的页面/组件、重复根区块、Open In… 接管、@ 源、项目终端快捷按钮与标签认领、引用到草稿、详情折叠、头部的新增入口、文件类型图标、树行的新建 / 重命名 / 删除菜单
 node test/editor.test.mjs             # 22 —— 家族解析、先证明再启动、子进程环境、启动结果、图标
 node test/workspace-picker.test.mjs   # 10 —— 主机文件对话框的三种结果与可注入 runner
 node test/tree.test.mjs               # 6 —— 树背后的目录列举：绝对正斜杠路径、目录在前、条数上限、非绝对路径直接拒绝

@@ -177,7 +177,7 @@ true of the code as it stands:
 | Editor icon | `lib/editor-icon.js` | Associated-icon extraction for the family entries no shipped route serves |
 | Host | `lib/index.js` | Discovery, the association store, caching, `tools/execute` interception, prompt section, notices, `/code-workspace`, sessionless `codeWorkspace/*` API, `@` discovery, editor and file-dialog endpoints |
 | File dialog | `lib/workspace-picker.js` | The host's native `.code-workspace` file dialog, as the file-shaped sibling of the shipped directory-only picker |
-| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback for degraded compositions, session-creation dock chip and its popover, "Open In…" takeover, `@` companion group |
+| Client | `lib/client.js` | The left-column entry and its sessionless central panel, the Conversation view page, its header-button fallback for degraded compositions, session-creation dock chip and its popover, "Open In…" takeover, `@` companion group, the tree rows' file operations (create / rename / delete with an in-page confirmation) |
 
 ## Why the writer is surgical
 
@@ -554,18 +554,19 @@ cannot serve it. The plugin opens its own namespace on the shared `/api` channel
 - a hand-written Typert contribution using `src-json` codecs and
   `invocation: { kind: 'direct' }`, registered through `ctx.inject(['typert'], …)`.
 
-Twenty endpoints, keyed by **paths** rather than a session id: `state`, `recent`,
+Twenty-five endpoints, keyed by **paths** rather than a session id: `state`, `recent`,
 `forgetFile`, `open`, `forget`, `useFile`, `create`, `addFolder`, `removeFolder`,
-`renameFolder`, `moveFolder`, `browse`, `makeDir`, `pick`, `pickFile`, `reveal`,
-`editors`, `editorIcon`, `openInEditor`, `listFiles`.
+`renameFolder`, `moveFolder`, `browse`, `tree`, `makeDir`, `createFile`, `createFolder`,
+`renameEntry`, `removeEntry`, `pick`, `pickFile`, `reveal`, `editors`, `editorIcon`,
+`openInEditor`, `listFiles`.
 
-The channel is keyed by path because the session-creation page has no session yet, but
-eleven endpoints answer differently depending on *which* session asks, because a
-session's own pick outranks a root's record. `openInEditor` must open the file THIS
-session is on, `listFiles` must index THIS session's root set, and every endpoint that
-resolves a file for a root (`state`) or records a pick (`open`, `forget`, `useFile`,
-`create`, `addFolder`, `removeFolder`, `renameFolder`, `moveFolder`) has the same
-dependency. All of them therefore take an **optional `sessionId`**: declared with
+The channel is keyed by path because the session-creation page has no session yet, but some
+endpoints answer differently depending on *which* session asks, because a session's own pick
+outranks a root's record. `openInEditor` must open the file THIS session is on, `listFiles` must
+index THIS session's root set, the four file-level endpoints must resolve the roots THIS session
+sees, and every endpoint that resolves a file for a root (`state`) or records a pick (`open`,
+`forget`, `useFile`, `create`, `addFolder`, `removeFolder`, `renameFolder`, `moveFolder`) has the
+same dependency. All of them therefore take an **optional `sessionId`**: declared with
 `acceptsUndefined: true`, which is how the shipped DSH descriptors mark a wire field a
 caller may leave out — without it a missing field is a protocol error rather than
 `undefined`, and the client omits it rather than sending `undefined` when there is no
@@ -585,6 +586,43 @@ command channel calls too, so the validation surface is identical on both.
 platform. The sandbox root handed to the policy is different: it is whatever the `fs`
 seam reported (`fs.processPath`), captured per folder at load time, because that is the
 spelling the sandbox layer itself produced.
+
+### File-level mutations from the tree
+
+The tree is a browser and a file manager: a file or directory row creates a child, renames
+itself, and deletes itself. Those four endpoints (`createFile`, `createFolder`,
+`renameEntry`, `removeEntry`) are deliberately **not** folder mutations — they never write
+the `.code-workspace` file — so they take a different guard from `requireEntry`:
+
+- **Scope.** `mutationScope(rootDir, sessionId)` answers "which directories may be touched":
+  the canonical session root plus every folder of the workspace file this session resolves
+  to, but only when the model can be READ. An unparseable file narrows the scope to the
+  session root rather than widening it. A target must lie inside one of those roots; a root
+  itself may be created INTO but is refused for rename/delete, so the tree cannot erase the
+  workspace's top level.
+- **The workspace file is out of reach.** It is the document that grants these roots and a
+  common layout keeps it inside one of them, so `refuseScopeFile` refuses to rename or
+  delete it with a message that says what it is.
+- **One segment.** A create/rename name is trimmed and must contain no separator and not be
+  `.`/`..` — the tree only ever names a child of a directory it listed. Everything else is
+  left to the OS; its own error names the character it refused.
+- **Transport.** The panel reaches these four over the sessionless channel in BOTH modes, the
+  same way it already reads `tree`; it carries the optional `sessionId` so the host resolves
+  the roots the *asking session* sees. Unlike a folder mutation there is nothing to attribute
+  to the agent — the `.code-workspace` file is untouched and no roots change — so the
+  command channel is not involved.
+- **Real filesystem, real checks.** These operations go through `node:fs` because the `fs`
+  seam has no removal call (`makeDir` already used `node:fs` for the same reason). Their
+  existence and kind checks therefore use `lstat` on the same disk they are about to
+  change: an existence test through the seam would consult a different view than the write,
+  which is how a rename can overwrite a file the seam never listed.
+- **Delete is destructive and says so.** The panel confirms in the page (not
+  `window.confirm`, which a host without a dialog would silently skip) and the host removes
+  a directory WITH its contents. There is no trash: `shell.trashItem` is Electron-main
+  only, and a session over SSH has no host desktop to send the file to.
+
+The rename test pins the seam/disk distinction: a target file that exists on disk but was
+never seeded into the fake seam must still be refused.
 
 ## Opening the workspace in an editor
 
@@ -836,8 +874,9 @@ one `dsh-multi-folder` carries for its config file.
 ## Tests
 
 `test/jsonc.test.mjs` (25), `test/workspace-file.test.mjs` (24), `test/host.test.mjs`
-(50), `test/client.test.mjs` (59), `test/editor.test.mjs` (22) and
-`test/workspace-picker.test.mjs` (10) — 190 cases — run with no DSH
+(54), `test/client.test.mjs` (87), `test/editor.test.mjs` (22),
+`test/workspace-picker.test.mjs` (10), `test/tree.test.mjs` (6) and
+`test/monaco-assets.test.mjs` (5) — 233 cases — run with no DSH
 runtime. The host tests use a fake `fs` seam, `systemPrompt`, `commands` registry and
 `shell`/`jobs`; the editor tests inject the platform, environment, registry reader,
 `PATH` lookup and file probe, and hand `launchEditor` a child-process double, so a test

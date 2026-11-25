@@ -9,7 +9,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -262,7 +262,8 @@ test('apply registers the prompt section, the command, the service and the remot
   assert.deepEqual(methods, [
     'state', 'recent', 'forgetFile', 'open', 'forget', 'useFile', 'create',
     'addFolder', 'removeFolder', 'renameFolder', 'moveFolder',
-    'browse', 'tree', 'makeDir', 'pick', 'pickFile', 'reveal', 'editors', 'editorIcon',
+    'browse', 'tree', 'makeDir', 'createFile', 'createFolder', 'renameEntry', 'removeEntry',
+    'pick', 'pickFile', 'reveal', 'editors', 'editorIcon',
     'openInEditor', 'listFiles',
   ])
   for (const invocation of b.remoteContribution.invocations) {
@@ -934,6 +935,123 @@ test('makeDir creates exactly one segment and refuses traversal', async () => {
 test('the pick API reports unavailability instead of opening a host dialog', async () => {
   const b = boot({ files: BASE_FILES, services: { directoryPicker: undefined } })
   assert.deepEqual(await b.api.pick('D:/ws'), { path: null, via: 'unavailable' })
+})
+
+// ------------------------------------------------ file-level tree mutations
+// create / rename / remove act on the REAL filesystem (the `fs` seam exposes
+// reads and workspace-file writes, not directory removal), so these tests run
+// against a real temporary workspace. What the fake seam is for here is the
+// workspace FILE: it decides which roots the containment check allows.
+
+test('createFile and createFolder add one child inside the workspace', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'dsh-cws-create-'))
+  const root = normalizeSpelling(base)
+  const file = normalizeSpelling(join(base, 'team.code-workspace'))
+  const text = '{ "folders": [{ "path": "." }] }\n'
+  await writeFile(file, text, 'utf8')
+  try {
+    const b = boot({
+      files: [
+        { path: root, type: 'directory' },
+        { path: file, type: 'file', text },
+      ],
+    })
+    const created = await b.api.createFile(root, root, 'notes.md')
+    assert.equal(created.path, root + '/notes.md')
+    assert.equal(created.kind, 'file')
+    assert.equal(await readFile(join(base, 'notes.md'), 'utf8'), '', 'a new file starts empty')
+
+    // Nothing is ever overwritten, and a name is one segment.
+    await assert.rejects(() => b.api.createFile(root, root, 'notes.md'), /already exists/)
+    await assert.rejects(() => b.api.createFile(root, root, '../evil.md'), /single path segment/)
+    await assert.rejects(() => b.api.createFile(root, root, 'nested/deep.md'), /single path segment/)
+
+    const folder = await b.api.createFolder(root, root, 'docs')
+    assert.equal(folder.kind, 'directory')
+    assert.equal((await stat(join(base, 'docs'))).isDirectory(), true)
+    await assert.rejects(() => b.api.createFolder(root, root, 'docs'), /already exists/)
+
+    // The child of a subdirectory, which is what the tree's own rows name.
+    const nested = await b.api.createFile(root, root + '/docs', 'a.md')
+    assert.equal(nested.path, root + '/docs/a.md')
+    assert.equal((await stat(join(base, 'docs', 'a.md'))).isFile(), true)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('renameEntry moves one entry in place and refuses to overwrite', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'dsh-cws-rename-'))
+  const root = normalizeSpelling(base)
+  await writeFile(join(base, 'a.md'), 'a\n', 'utf8')
+  await writeFile(join(base, 'b.md'), 'b\n', 'utf8')
+  try {
+    const b = boot({ files: [{ path: root, type: 'directory' }] })
+    const renamed = await b.api.renameEntry(root, root + '/a.md', 'first.md')
+    assert.equal(renamed.changed, true)
+    assert.equal(renamed.from, root + '/a.md')
+    assert.equal(renamed.path, root + '/first.md')
+    await assert.rejects(() => stat(join(base, 'a.md')), /ENOENT/)
+    assert.equal(await readFile(join(base, 'first.md'), 'utf8'), 'a\n')
+
+    await assert.rejects(() => b.api.renameEntry(root, root + '/first.md', 'b.md'), /already exists/)
+    await assert.rejects(() => b.api.renameEntry(root, root + '/first.md', 'x/y.md'), /single path segment/)
+    // The same name is a no-op rather than an error.
+    assert.equal((await b.api.renameEntry(root, root + '/first.md', 'first.md')).changed, false)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('removeEntry deletes a file, and a directory with its contents', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'dsh-cws-remove-'))
+  const root = normalizeSpelling(base)
+  await mkdir(join(base, 'docs', 'deep'), { recursive: true })
+  await writeFile(join(base, 'docs', 'deep', 'a.md'), 'a\n', 'utf8')
+  await writeFile(join(base, 'b.md'), 'b\n', 'utf8')
+  try {
+    const b = boot({ files: [{ path: root, type: 'directory' }] })
+    assert.deepEqual(await b.api.removeEntry(root, root + '/b.md'), { path: root + '/b.md', kind: 'file' })
+    await assert.rejects(() => stat(join(base, 'b.md')), /ENOENT/)
+    const removed = await b.api.removeEntry(root, root + '/docs')
+    assert.equal(removed.kind, 'directory')
+    await assert.rejects(() => stat(join(base, 'docs')), /ENOENT/)
+    await assert.rejects(() => b.api.removeEntry(root, root + '/b.md'), /does not exist/)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a file-level mutation never leaves the workspace or touches its workspace file', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'dsh-cws-scope-'))
+  const outside = await mkdtemp(join(tmpdir(), 'dsh-cws-outside-'))
+  const root = normalizeSpelling(base)
+  const file = normalizeSpelling(join(base, 'team.code-workspace'))
+  const text = '{ "folders": [{ "path": "." }] }\n'
+  await writeFile(file, text, 'utf8')
+  try {
+    const b = boot({
+      files: [
+        { path: root, type: 'directory' },
+        { path: file, type: 'file', text },
+      ],
+    })
+    // A sibling directory is not a workspace root.
+    const foreign = normalizeSpelling(outside)
+    await assert.rejects(() => b.api.createFile(root, foreign, 'x.md'), /limited to this workspace/)
+    await assert.rejects(() => b.api.removeEntry(root, foreign), /limited to paths inside/)
+
+    // A root itself is addressable by its own name, but cannot be deleted or
+    // renamed through the tree.
+    await assert.rejects(() => b.api.removeEntry(root, root), /limited to paths inside/)
+    await assert.rejects(() => b.api.renameEntry(root, root, 'renamed'), /limited to paths inside/)
+
+    // The document that grants these roots is not deletable from the tree.
+    await assert.rejects(() => b.api.removeEntry(root, file), /code-workspace file this workspace is open on/)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
 })
 
 // ------------------------------------------------------- open in an editor
