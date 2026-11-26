@@ -41,6 +41,8 @@ function createFakeFs(initial) {
 
   const find = (path) => entries.find((e) => toComparable(e.path) === toComparable(path))
   const writes = []
+  /** How many directory listings the plugin asked for — a tree walk costs one each. */
+  let listDirCalls = 0
 
   const fs = {
     async resolve(path, opts = {}) {
@@ -61,6 +63,7 @@ function createFakeFs(initial) {
       return entry.text
     },
     async listDir(target) {
+      listDirCalls += 1
       const base = toComparable(target.path)
       const out = []
       for (const entry of entries) {
@@ -101,6 +104,9 @@ function createFakeFs(initial) {
     fs,
     writes,
     entries,
+    get listDirCalls() {
+      return listDirCalls
+    },
     textAt: (path) => find(path)?.text,
     setText: (path, text) => {
       const existing = find(path)
@@ -264,7 +270,7 @@ test('apply registers the prompt section, the command, the service and the remot
     'addFolder', 'removeFolder', 'renameFolder', 'moveFolder',
     'browse', 'tree', 'makeDir', 'createFile', 'createFolder', 'renameEntry', 'removeEntry',
     'pick', 'pickFile', 'reveal', 'editors', 'editorIcon',
-    'openInEditor', 'listFiles',
+    'openInEditor', 'listFiles', 'search',
   ])
   for (const invocation of b.remoteContribution.invocations) {
     assert.equal(invocation.service, 'codeWorkspace')
@@ -280,7 +286,7 @@ test('apply registers the prompt section, the command, the service and the remot
   // field is a protocol error rather than `undefined`.
   const byMethod = (method) => b.remoteContribution.invocations.find((i) => i.method === method)
   const paramOf = (method, name) => byMethod(method).parameters.find((p) => p.name === name)
-  for (const method of ['openInEditor', 'listFiles', 'state', 'useFile', 'addFolder']) {
+  for (const method of ['openInEditor', 'listFiles', 'search', 'state', 'useFile', 'addFolder']) {
     const optional = paramOf(method, 'sessionId')
     assert.ok(optional, method + ' must accept a session id')
     assert.equal(optional.acceptsUndefined, true, method + '/sessionId must be optional')
@@ -810,6 +816,134 @@ test('hidden entries are indexed but invisible to a global query', async () => {
   assert.deepEqual(global.candidates.map((c) => c.rel), ['shown.ts'])
   const explicit = await b.api.listFiles('D:/ws', '.hidden')
   assert.deepEqual(explicit.candidates.map((c) => c.rel), ['.hidden.ts'])
+})
+
+// ------------------------------------------------------- filename search
+
+const SEARCH_FILES = [
+  { path: 'D:/ws', type: 'directory' },
+  { path: 'D:/ws/app.code-workspace', type: 'file', text: WORKSPACE },
+  { path: 'D:/ws/src', type: 'directory' },
+  { path: 'D:/ws/src/config.ts', type: 'file', text: 'x' },
+  { path: 'D:/ws/src/configuration.md', type: 'file', text: 'x' },
+  { path: 'D:/ws/src/renderer.tsx', type: 'file', text: 'x' },
+  // A DIRECTORY whose name matches the query must never be a result: this list
+  // answers "which file", and a folder is not a file.
+  { path: 'D:/ws/src/config', type: 'directory' },
+  { path: 'D:/ws/src/config/settings.json', type: 'file', text: 'x' },
+  { path: 'D:/ws/.env', type: 'file', text: 'x' },
+  // The report that shaped the dotfile rule: the tree shows `.gitignore`, so
+  // typing `git` has to find it.
+  { path: 'D:/ws/.gitignore', type: 'file', text: 'x' },
+  { path: 'D:/other', type: 'directory' },
+  { path: 'D:/other/src', type: 'directory' },
+  { path: 'D:/other/src/main.ts', type: 'file', text: 'x' },
+]
+
+test('search ranks file names across every root and never returns a directory', async () => {
+  const b = boot({ files: SEARCH_FILES })
+  const config = await b.api.search('D:/ws', 'config')
+  // A name PREFIX outranks a longer name that merely starts the same way, and
+  // the directory `src/config` is absent: the list is files only.
+  assert.deepEqual(config.files.map((f) => f.name), ['config.ts', 'configuration.md'])
+  assert.equal(config.files[0].rel, 'src/config.ts')
+  assert.equal(config.files[0].path, 'D:/ws/src/config.ts')
+  assert.equal(config.files[0].rootLabel, 'ws')
+  assert.equal(config.files[0].dir, false)
+
+  // The additional root is searched too — it lies outside the session root.
+  const main = await b.api.search('D:/ws', 'main')
+  assert.deepEqual(main.files.map((f) => f.rel), ['src/main.ts'])
+  assert.equal(main.files[0].rootLabel, 'Other')
+  assert.equal(main.files[0].path, 'D:/other/src/main.ts')
+
+  // A subsequence hit still answers (`rtsx` inside `renderer.tsx`).
+  const fuzzy = await b.api.search('D:/ws', 'rtsx')
+  assert.equal(fuzzy.files[0].name, 'renderer.tsx')
+
+  // A query that spells a separator asks about a PATH, so it may reach a file
+  // whose own name does not contain the fragment.
+  const byPath = await b.api.search('D:/ws', 'config/settings')
+  assert.deepEqual(byPath.files.map((f) => f.rel), ['src/config/settings.json'])
+
+  // ...but a bare name fragment does not drag in that directory's contents.
+  assert.ok(!config.files.some((f) => f.rel === 'src/config/settings.json'))
+})
+
+test('search answers hidden files too, but never what the tree hides', async () => {
+  const b = boot({
+    files: SEARCH_FILES.concat([
+      { path: 'D:/ws/node_modules', type: 'directory' },
+      { path: 'D:/ws/node_modules/pkg.ts', type: 'file', text: 'x' },
+      { path: 'D:/ws/.git', type: 'directory' },
+      { path: 'D:/ws/.git/config', type: 'file', text: 'x' },
+    ]),
+  })
+  const blank = await b.api.search('D:/ws', '   ')
+  assert.deepEqual(blank.files, [])
+  assert.equal(blank.total, 0)
+
+  // A dotfile is a real file the tree lists, so the field must find it: a
+  // search that silently skipped half of what is on screen would be a trap.
+  assert.deepEqual((await b.api.search('D:/ws', 'env')).files.map((f) => f.rel), ['.env'])
+  assert.deepEqual((await b.api.search('D:/ws', 'git')).files.map((f) => f.rel), ['.gitignore'])
+  assert.deepEqual((await b.api.search('D:/ws', '.env')).files.map((f) => f.rel), ['.env'])
+
+  // The entries the tree never shows are outside the index entirely.
+  assert.deepEqual((await b.api.search('D:/ws', 'pkg')).files, [])
+  assert.deepEqual((await b.api.search('D:/ws', 'git/config')).files, [])
+})
+
+test('a session with no workspace file searches its own folder', async () => {
+  // The page draws that session as a one-folder workspace (`singleFolderRoot`),
+  // so the field above the tree has to answer for the same folder — this is the
+  // case where the tree listed every file and the search claimed there were none.
+  const b = boot({
+    files: [
+      { path: 'D:/plain', type: 'directory' },
+      { path: 'D:/plain/app.ts', type: 'file', text: 'x' },
+      { path: 'D:/plain/.gitignore', type: 'file', text: 'x' },
+      { path: 'D:/plain/src', type: 'directory' },
+      { path: 'D:/plain/src/main.ts', type: 'file', text: 'x' },
+    ],
+    standing: { mode: 'workspace-write', workspaceRoot: 'D:/plain' },
+  })
+  const found = await b.api.search('D:/plain', 'main')
+  assert.deepEqual(found.files.map((f) => f.rel), ['src/main.ts'])
+  assert.equal(found.files[0].path, 'D:/plain/src/main.ts')
+  // One primary folder, described exactly the way the tree's single row is.
+  assert.equal(found.roots.length, 1)
+  assert.equal(found.roots[0].resolvedPath, 'D:/plain')
+  assert.equal(found.roots[0].isPrimary, true)
+
+  // A blank query still describes the folder, and answers no files.
+  const blank = await b.api.search('D:/plain', '   ')
+  assert.deepEqual(blank.files, [])
+  assert.equal(blank.roots.length, 1)
+
+  // The walk is shared and cached: a second query costs no listing.
+  const calls = b.world.listDirCalls
+  assert.deepEqual((await b.api.search('D:/plain', 'app')).files.map((f) => f.rel), ['app.ts'])
+  assert.equal(b.world.listDirCalls, calls)
+})
+
+test('concurrent searches share one index walk', async () => {
+  const b = boot({ files: SEARCH_FILES })
+  // Warm discovery and the model so the count below measures the INDEX WALK.
+  await b.api.state('D:/ws')
+  const before = b.world.listDirCalls
+  await Promise.all([
+    b.api.search('D:/ws', 'config'),
+    b.api.search('D:/ws', 'main'),
+    b.api.search('D:/ws', 'json'),
+  ])
+  // D:/ws, D:/ws/src, D:/ws/src/config, D:/other, D:/other/src — one walk, not
+  // three (the second and third query join the first one's promise).
+  assert.equal(b.world.listDirCalls - before, 5)
+  // A query answered from the cache does not walk at all.
+  const warm = b.world.listDirCalls
+  await b.api.search('D:/ws', 'config')
+  assert.equal(b.world.listDirCalls, warm)
 })
 
 test('the command lists, adds and removes folders and arms a notice on change', async () => {

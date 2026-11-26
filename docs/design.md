@@ -117,9 +117,15 @@ is a silent choice of roots the user never made.
 
 `forgetRoot` writes `{ root, file: null }` rather than dropping the records. A root
 holding exactly one `.code-workspace` file would otherwise be re-adopted by step 3 on
-the very next read, and the panel's "Unlink" button would look like a button that does
+the very next read, and a `use ""` that only dropped the record would look like it did
 nothing. The tombstone lasts until the user picks a file for that root again
 (`rememberRoot` removes it as it records the new pick).
+
+**The UI does not expose a button for it any more.** It was drawn on the detail card as
+"unlink this session", but it cleared the ROOT's records for everyone — a global write
+behind a session-shaped label, next to the manager row's `forgetFile`, which is a genuinely
+different operation (delete one record). The tombstone remains reachable through
+`/code-workspace use ""` and the host API; what went away is the misleading button.
 
 **Consequence, stated plainly:** clearing is per-root plus per-session. It drops the
 addressed root's records *for everyone* and this session's own pointer; other sessions
@@ -422,6 +428,32 @@ root — DSH then treats them as one workspace — so marking by root would ligh
 and tell the user nothing; the store also carries no root for a recent record, only the file
 and its directory.
 
+**Choosing, creating and recalling a workspace file are the manager's job.** They used to
+sit on the detail card's action row, where they duplicated the page whose entire subject is
+that list, and where "switch file" was a session-scoped write on a card that otherwise only
+describes state. Moving them is a trade, stated plainly: the manager has no session by
+construction, so its picks ride the sessionless channel and write the **root's record** —
+later sessions inherit it, while a session already open keeps its own file pointer. Letting
+the manager address whatever session happens to be on screen would make a global page
+silently mean something per-session, which is the exact confusion the page split exists to
+avoid. The card keeps the actions that ARE about the current file: reveal (in the title row,
+beside the editor buttons — it is a utility on this file) and open. Unlink is not among
+them: it wrote a root tombstone while reading as a session action; record removal is
+`forgetFile` on the manager row.
+
+Creating needs a directory, so the manager writes beside the row it marks current (that
+record's `fileDir`, where workspace files usually live), falling back to the page's scope
+root — the current session's cwd, or the store's last root when no session is on screen;
+with neither, the button is disabled and its tooltip says to pick a row. The form
+prints the target, so the write is never a surprise. Recall ("recent") swaps the list for
+the recent-file section in place rather than adding a second, nearly identical list, and the
+section's ✕ returns to the workspace list.
+
+The manager reads the current session's cwd even though it has no session kit. That is not
+an attribution — every manager write still rides the sessionless channel — it is what lets
+the page mark the same row the session is on and hand the create action a directory before
+the detail tab was ever opened.
+
 Two sources are joined by path spelling because they answer different questions: the
 plugin's store ("a file I have used", probed per row by `recent`) and the workspace service
 ("a workspace this app already has"). A workspace the plugin has no file for is still listed,
@@ -440,11 +472,13 @@ profile's store. The script now forgets it in its own teardown.
 
 A session created in a directory with no `.code-workspace` file (or with several, which is
 ambiguous by discovery) has nothing associated, and that is exactly the state where the user
-needs an *action*, not a status line. So the empty state carries the actions — switch file
-(browse), the host's own dialog, and create — instead of leaving them one level down inside
-a file section that only exists once a file is known. Without that, removing the header
-button's popover would have removed the only way to associate a workspace file from an open
-session.
+needs an *action*, not a status line. Those actions now live on the manager page — choosing,
+creating and recalling are file-level acts, and the card only describes the file this
+session is on. The one exception is the **empty state** (a session whose root is not even
+known, `rootDir` empty): there the card would have nothing to describe and no directory to
+create in, so its three buttons remain. Without that, the page would be a dead end in the
+one state where it has no directory to offer; with it, an open session still has a path to a
+workspace file that does not require leaving the tab.
 
 The browser starts at the **host home** (`remote.$host.home`), not at the session's own
 directory. That is deliberate: the session directory is the one place the file has already
@@ -554,24 +588,24 @@ cannot serve it. The plugin opens its own namespace on the shared `/api` channel
 - a hand-written Typert contribution using `src-json` codecs and
   `invocation: { kind: 'direct' }`, registered through `ctx.inject(['typert'], …)`.
 
-Twenty-five endpoints, keyed by **paths** rather than a session id: `state`, `recent`,
+Twenty-six endpoints, keyed by **paths** rather than a session id: `state`, `recent`,
 `forgetFile`, `open`, `forget`, `useFile`, `create`, `addFolder`, `removeFolder`,
 `renameFolder`, `moveFolder`, `browse`, `tree`, `makeDir`, `createFile`, `createFolder`,
 `renameEntry`, `removeEntry`, `pick`, `pickFile`, `reveal`, `editors`, `editorIcon`,
-`openInEditor`, `listFiles`.
+`openInEditor`, `listFiles`, `search`.
 
 The channel is keyed by path because the session-creation page has no session yet, but some
 endpoints answer differently depending on *which* session asks, because a session's own pick
-outranks a root's record. `openInEditor` must open the file THIS session is on, `listFiles` must
-index THIS session's root set, the four file-level endpoints must resolve the roots THIS session
-sees, and every endpoint that resolves a file for a root (`state`) or records a pick (`open`,
-`forget`, `useFile`, `create`, `addFolder`, `removeFolder`, `renameFolder`, `moveFolder`) has the
-same dependency. All of them therefore take an **optional `sessionId`**: declared with
-`acceptsUndefined: true`, which is how the shipped DSH descriptors mark a wire field a
-caller may leave out — without it a missing field is a protocol error rather than
-`undefined`, and the client omits it rather than sending `undefined` when there is no
-session. In-session callers reach the same core through `/code-workspace`, which carries
-the agent and is attributed automatically.
+outranks a root's record. `openInEditor` must open the file THIS session is on, `listFiles`
+and `search` must index THIS session's root set, the four file-level endpoints must resolve the
+roots THIS session sees, and every endpoint that resolves a file for a root (`state`) or
+records a pick (`open`, `forget`, `useFile`, `create`, `addFolder`, `removeFolder`,
+`renameFolder`, `moveFolder`) has the same dependency. All of them therefore take an
+**optional `sessionId`**: declared with `acceptsUndefined: true`, which is how the shipped
+DSH descriptors mark a wire field a caller may leave out — without it a missing field is a
+protocol error rather than `undefined`, and the client omits it rather than sending
+`undefined` when there is no session. In-session callers reach the same core through
+`/code-workspace`, which carries the agent and is attributed automatically.
 
 Without the parameter the answer is the per-ROOT association, which is exactly what a
 brand-new session inherits: correct, never wrong, just not yet session-specific.
@@ -787,6 +821,45 @@ already has read access to and contributes a **companion** group.
   has no relative spelling, and the prompt grammar already uses host paths.
 - A discovery failure returns an empty group, never a rejection: autocomplete must not
   be able to break the composer.
+
+## The filename search, and the one index it reads
+
+The panel's search field asks one question — "which file is called this?" — and the
+answer must cover **every** root, including the additional ones the shipped Files page
+can never list. It therefore rides the index `@` discovery already builds rather than
+a second one: `coreSearchFiles` shares `indexFor`, which means the same exclusions
+(`node_modules`, `.git`, …), the same 20 000-entry bound and the same 4 s TTL. Two lists
+that could disagree about what exists would be a bug factory, and a browser-held copy of
+the index would be a third.
+
+- **Both shapes of workspace.** A session with a `.code-workspace` file searches that file's folders; a session
+  without one searches its own root, because the page still draws it as a one-folder workspace
+  (`singleFolderRoot`). The two cases are different cache identities — `(file, stamp)` versus
+  `('single:<root>', 'no-file')` — so neither can answer with the other's files. Missing the second case was
+  a real bug: the tree listed the files and the field above it answered "no matches".
+- **Files only.** A directory is never a result here, unlike `@` (where a folder is a
+  useful entry point). The list answers "which file".
+- **Dotfiles ARE answers — the one deliberate difference from `@`.** The page's tree
+  lists `.gitignore`, `.env` and the rest, so a search that silently skipped them would
+  hide half of what is on screen from the one field that is supposed to find it (the
+  first report of this feature was exactly that: `git` answered nothing while
+  `.gitignore` sat in the tree). They rank 30 points below a visible file of otherwise
+  equal quality, and what the tree genuinely never shows (`node_modules`, `.git` itself,
+  `dist`, …) is outside the index, so it cannot appear either way.
+- **The basename decides.** Exact, then prefix, then a hit at a word boundary, then a
+  substring, then a subsequence — the compactness of the subsequence window is what
+  separates `wsp` → `workspace.ts` from a scattered match deep in a path. A query that
+  spells `/` is asking about a path, so `rel` is matched instead; a bare fragment must
+  not drag in every file inside a matching directory.
+- **Deterministic order.** Ties break shorter-path-first, then alphabetically, so the
+  same query always answers identically — a dropdown that reshuffles between keystrokes
+  is unreadable.
+- **One walk, not one per keystroke.** The field asks on every keystroke, so a
+  cache-miss burst would otherwise start several full tree walks. `indexFor` keeps the
+  in-flight promise and joins concurrent queries onto it; the pair
+  `(file, stamp)` is the identity, so a changed workspace file never joins a stale walk.
+- **Read-only.** Nothing here writes, and the endpoint reuses `requireRoot` /
+  `entryFor`, so a session's association still decides which folder set is searched.
 
 ## Security posture
 

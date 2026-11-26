@@ -800,7 +800,17 @@ test('with nothing associated the page itself is the picker, starting at the hos
 // ------------------------------------------- the sidebar entry and its panel
 
 test('the sidebar entry opens the sessionless manager page, so it works with no workspace open yet', async () => {
-  const { panel, overlay, commandLog, rpcLog } = await boot()
+  // No session cwd either: this is the app before any workspace exists, the
+  // state the left entry exists for.
+  const { panel, overlay, commandLog, rpcLog } = await boot({
+    services: {
+      sessions: {
+        list: {
+          getSnapshot: () => ({ current: 'session-1', ids: ['session-1'], byId: { 'session-1': { cwd: undefined } } }),
+        },
+      },
+    },
+  })
   assert.ok(panel, 'the sidebar panel must register as the main cell')
   expand(panel.component({}))
   await flush()
@@ -817,15 +827,61 @@ test('the sidebar entry opens the sessionless manager page, so it works with no 
   assert.match(textOf(tree), /代码工作区/)
   assert.match(textOf(tree), /切换文件/)
   assert.match(textOf(tree), /从资源管理器选择/)
+  // The file-management trio the detail card no longer carries lives here.
+  assert.match(textOf(tree), /新建工作区文件/)
+  assert.match(textOf(tree), /最近使用/)
   // The Conversation tab's detail card is NOT repeated here: its actions are
   // scoped to a session, and this page has none. A card on this page would say
   // "unlink this workspace" with no session to attribute the choice to.
   assert.equal(nodesWhere(tree, (node) => node.type === 'h1').length, 0, 'no identity card on the manager page')
   assert.doesNotMatch(textOf(tree), /工作区根目录/)
-  // Creating a workspace file needs a directory, and this page has no session to
-  // supply one, so the action stays where a directory exists.
-  assert.doesNotMatch(textOf(tree), /新建工作区文件/)
+  // Creating writes beside the active file, or into the page's scope root. With
+  // neither there is no directory to use, so the button exists but explains
+  // itself instead of opening a form that cannot succeed.
+  const create = buttonByLabel(tree, '新建工作区文件')
+  assert.ok(create, 'the manager must carry the create action')
+  assert.equal(create.props.disabled, true)
+  assert.match(String(create.props.title), /先在列表里选中/)
   assert.equal(expand(overlay.component({})), null)
+})
+
+test('the detail card leaves the file-management trio to the manager page', async () => {
+  const { view, hero, overlay } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') {
+        return ok({ editors: [{ id: 'vscode', label: 'VS Code', executable: 'C:/Code.exe' }], preferred: 'vscode', ssh: false, platform: 'win32' })
+      }
+      return ok(STATE)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  const viewTree = expand(view.component(kit()))
+  assert.doesNotMatch(textOf(viewTree), /切换文件/, 'the view no longer switches files')
+  assert.doesNotMatch(textOf(viewTree), /新建工作区文件/, 'the view no longer creates files')
+  assert.doesNotMatch(textOf(viewTree), /最近使用/, 'the view no longer recalls files')
+  // What remains is the file this session is on, and the actions on that file:
+  // reveal sits in the title row beside the editor buttons, and there is no
+  // page-level unlink any more (record removal is the manager row's job).
+  assert.ok(buttonByLabel(viewTree, '在资源管理器中显示'), 'reveal stays on the card')
+  assert.equal(buttonByLabel(viewTree, '取消关联'), undefined, 'the card no longer unlinks')
+  // The user asked for it to sit WITH the editor buttons, not in a row of its
+  // own: the title row carries both, the editor first.
+  const flat = nodesWhere(viewTree, () => true)
+  const editorButton = buttonByLabel(viewTree, 'VS Code')
+  assert.ok(editorButton, 'the editor button renders')
+  assert.ok(flat.indexOf(editorButton) < flat.indexOf(buttonByLabel(viewTree, '在资源管理器中显示')), 'reveal follows the editor buttons')
+
+  // The creation page's popover IS a picker, so it keeps all three.
+  const chip = expand(hero.component(kit()))
+  chip.props.onClick()
+  await flush()
+  const overlayTree = expand(overlay.component({}))
+  assert.match(textOf(overlayTree), /切换文件/)
+  assert.match(textOf(overlayTree), /新建工作区文件/)
+  assert.match(textOf(overlayTree), /最近使用/)
 })
 
 test('the sidebar page is a manager: it lists every workspace it knows, and marks the registered ones', async () => {
@@ -875,6 +931,31 @@ test('the sidebar page is a manager: it lists every workspace it knows, and mark
   // `D:/ws` is a registered DSH workspace, `D:/gone` is not.
   assert.match(text, /已注册/)
   assert.match(text, /不存在/)
+})
+
+test('the manager recalls recent files in place of the list, and closing returns', async () => {
+  const { panel } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/recent') {
+        return ok({ files: [{ file: 'D:/ws/app.code-workspace', fileDir: 'D:/ws', title: 'app', exists: true, missing: false }] })
+      }
+      return ok(STATE)
+    },
+  })
+  expand(panel.component({}))
+  await flush()
+  let tree = expand(panel.component({}))
+  buttonByLabel(tree, '最近使用').props.onClick()
+  await flush()
+  tree = expand(panel.component({}))
+  assert.doesNotMatch(textOf(tree), /代码工作区/, 'the recent view replaces the list header')
+  assert.match(textOf(tree), /app/, 'the recent rows render')
+  const close = buttonByTitle(tree, '关闭')
+  assert.ok(close, 'the recent view can be closed')
+  close.props.onClick()
+  await flush()
+  tree = expand(panel.component({}))
+  assert.match(textOf(tree), /代码工作区/, 'closing returns to the workspace list')
 })
 
 test('the registered marks follow the workspace list when it changes', async () => {
@@ -969,7 +1050,7 @@ test('the sidebar panel shows a workspace picked on the creation page', async ()
   assert.equal(expand(overlay.component({})), null, 'the sidebar page takes over from the popover')
 })
 
-test('the browser offers the host file dialog, and a chosen file is opened as a workspace', async () => {
+test('the manager offers the host file dialog, and a chosen file is opened as a workspace', async () => {
   const listing = {
     path: 'C:/Users/edy',
     parent: 'C:/Users',
@@ -978,7 +1059,7 @@ test('the browser offers the host file dialog, and a chosen file is opened as a 
     truncated: false,
   }
   const opened = []
-  const { view, commandLog } = await boot({
+  const { panel, commandLog } = await boot({
     onRpc: (endpoint, args) => {
       if (endpoint === 'codeWorkspace/browse') return ok(listing)
       if (endpoint === 'codeWorkspace/pickFile') return ok({ outcome: 'picked', path: 'D:/ws/app.code-workspace' })
@@ -990,29 +1071,23 @@ test('the browser offers the host file dialog, and a chosen file is opened as a 
       if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
       return ok(STATE)
     },
-    // A pick made INSIDE a session rides the command channel, so the host can
-    // attribute the choice to this session rather than to the directory.
-    onCommand: (line) =>
-      line.indexOf('use ') === 0 ? commandOk(Object.assign({}, STATE, { workspace: { id: 'w9', path: 'D:/ws', title: 'app' } })) : undefined,
   })
-  expand(view.component(kit()))
+  expand(panel.component({}))
   await flush()
-  const tree = expand(view.component(kit()))
+  const tree = expand(panel.component({}))
   buttonByLabel(tree, '切换文件').props.onClick()
   await flush()
-  const browseTree = expand(view.component(kit()))
+  const browseTree = expand(panel.component({}))
   // The dialog is offered beside the in-app browser, not instead of it: a host
   // that cannot show one (SSH, non-Windows) still has a working path.
   const native = buttonByLabel(browseTree, '从资源管理器选择')
   assert.ok(native, 'the host file dialog must be offered — tree: ' + textOf(browseTree))
   native.props.onClick()
   await flush()
-  assert.deepEqual(opened, [])
-  // The panel's own read rides the same channel, so pick the line by spelling.
-  const uses = commandLog.filter((entry) => entry.line.indexOf('/code-workspace use ') === 0)
-  assert.equal(uses.length, 1)
-  assert.equal(uses[0].sessionId, 'session-1')
-  assert.equal(uses[0].line, '/code-workspace use "D:/ws/app.code-workspace"')
+  // The manager has no session by construction, so a pick there rides the
+  // sessionless channel and the host records it for the root, not for a session.
+  assert.deepEqual(opened, ['D:/ws/app.code-workspace'])
+  assert.deepEqual(commandLog, [])
 })
 
 test('a workspace file folder is where "pick another file" starts once one is associated', async () => {
@@ -1025,7 +1100,7 @@ test('a workspace file folder is where "pick another file" starts once one is as
     file: 'D:/home/workspace/api.code-workspace',
   })
   const listing = { path: 'D:/home/workspace', parent: 'D:/home', home: 'C:/Users/edy', entries: [], truncated: false }
-  const { view, rpcLog } = await boot({
+  const { view, panel, rpcLog } = await boot({
     onRpc: (endpoint) => {
       if (endpoint === 'codeWorkspace/browse') return ok(listing)
       if (endpoint === 'codeWorkspace/pickFile') return ok({ outcome: 'cancelled' })
@@ -1035,17 +1110,21 @@ test('a workspace file folder is where "pick another file" starts once one is as
     },
     onCommand: () => commandOk(nested),
   })
+  // The view names the session's file; the manager page then inherits that
+  // scope, which is what gives its picker a directory to start in.
   expand(view.component(kit()))
   await flush()
-  // "Switch file" in the file section opens the browser at the FILE's folder...
-  buttonByLabel(expand(view.component(kit())), '切换文件').props.onClick()
+  expand(panel.component({}))
+  await flush()
+  // "Switch file" in the manager opens the browser at the FILE's folder...
+  buttonByLabel(expand(panel.component({})), '切换文件').props.onClick()
   await flush()
   const browse = rpcLog.filter((entry) => entry.endpoint === 'codeWorkspace/browse')
   assert.ok(browse.length > 0, 'the browser must have been opened')
   assert.equal(browse.at(-1).args.path, 'D:/home/workspace')
 
   // ...and the host dialog offered beside it starts there too.
-  buttonByLabel(expand(view.component(kit())), '从资源管理器选择').props.onClick()
+  buttonByLabel(expand(panel.component({})), '从资源管理器选择').props.onClick()
   await flush()
   const pick = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/pickFile')
   assert.deepEqual(pick.args, { cwd: 'D:/home/workspace' })
@@ -1059,7 +1138,7 @@ test('a host that cannot show the dialog says so once, and the browser stays usa
     entries: [],
     truncated: false,
   }
-  const { view } = await boot({
+  const { panel } = await boot({
     onRpc: (endpoint) => {
       if (endpoint === 'codeWorkspace/browse') return ok(listing)
       if (endpoint === 'codeWorkspace/pickFile') {
@@ -1070,13 +1149,13 @@ test('a host that cannot show the dialog says so once, and the browser stays usa
       return ok(STATE)
     },
   })
-  expand(view.component(kit()))
+  expand(panel.component({}))
   await flush()
-  buttonByLabel(expand(view.component(kit())), '切换文件').props.onClick()
+  buttonByLabel(expand(panel.component({})), '切换文件').props.onClick()
   await flush()
-  buttonByLabel(expand(view.component(kit())), '从资源管理器选择').props.onClick()
+  buttonByLabel(expand(panel.component({})), '从资源管理器选择').props.onClick()
   await flush()
-  const tree = expand(view.component(kit()))
+  const tree = expand(panel.component({}))
   assert.match(textOf(tree), /这台主机打不开系统文件对话框/)
   assert.match(textOf(tree), /SSH/)
   // The in-app browser is still there, which is the whole reason to explain it.
@@ -2030,23 +2109,6 @@ test('removing a folder asks first, then issues the indexed remove', async () =>
   assert.ok(commandLog.some((call) => call.line === '/code-workspace remove 0'), JSON.stringify(commandLog))
 })
 
-test('the page-level unlink is not the manager row, asks first, and issues the unlink command', async () => {
-  const { view, commandLog, confirmations } = await boot()
-  expand(view.component(kit()))
-  await flush()
-  const tree = expand(view.component(kit()))
-  const unlink = buttonByLabel(tree, '取消关联')
-  assert.ok(unlink, 'the identity card must offer the unlink action')
-  // An accessible-name lookup for 取消关联 must find the MANAGER row first, so
-  // this page-level button deliberately carries no title.
-  assert.equal(unlink.props.title, undefined)
-  unlink.props.onClick()
-  await flush()
-  assert.equal(confirmations.length, 1)
-  assert.match(confirmations[0], /不再使用这个工作区文件/)
-  assert.ok(commandLog.some((call) => call.line === '/code-workspace use ""'), JSON.stringify(commandLog))
-})
-
 test('paths are copyable and every icon-only control carries a tooltip and an accessible name', async () => {
   const { view } = await boot()
   expand(view.component(kit()))
@@ -2153,6 +2215,128 @@ test('a one-folder workspace with no workspace file still gets the tree, read-on
   assert.doesNotMatch(textOf(menu), /重命名/)
   assert.doesNotMatch(textOf(menu), /移除/)
   assert.equal(nodesWhere(menu, (node) => node.props && node.props.title === '拖动排序').length, 0, 'no drag handle without a file')
+})
+
+// ------------------------------------------------------- filename search
+// The tree answers "find that file" for the WHOLE workspace: one field over
+// every folder, one list of hits, and a click (or Enter) opens the same preview
+// a tree row does. The host owns the ranking; the client owns selection.
+
+const SEARCH_ANSWER = {
+  rootDir: 'D:/ws',
+  roots: STATE.roots,
+  query: 'config',
+  total: 2,
+  truncated: false,
+  files: [
+    { path: 'D:/ws/src/config.ts', rel: 'src/config.ts', name: 'config.ts', rootPath: 'D:/ws', rootLabel: 'ws', dir: false },
+    { path: 'D:/other/config.json', rel: 'config.json', name: 'config.json', rootPath: 'D:/other', rootLabel: 'Other', dir: false },
+  ],
+}
+
+/** Boot the panel with a recording sidebar and a stub search answer. */
+async function bootSearch({ answer = SEARCH_ANSWER, fail = false } = {}) {
+  const opened = []
+  const { view, rpcLog } = await boot({
+    services: {
+      sidebarRight: {
+        // The preview seam the tree rows use; a search hit must use the same one.
+        openResourceIn: (sessionId, address) => opened.push({ sessionId, address }),
+      },
+    },
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/state') return ok(STATE)
+      if (endpoint === 'codeWorkspace/search') return fail ? { ok: false, error: { message: 'boom' } } : ok(answer)
+      return ok(null)
+    },
+  })
+  expand(view.component(kit()))
+  await flush()
+  return { rpcLog, opened, render: () => expand(view.component(kit())) }
+}
+
+const searchField = (tree) => inputsIn(tree).find((input) => input.props['data-field'] === 'search-files')
+const searchHits = (tree) => nodesWhere(tree, (node) => node.props && typeof node.props['data-search-hit'] === 'string')
+
+test('the tree offers a filename search that spans every folder and opens a hit', async () => {
+  const { rpcLog, opened, render } = await bootSearch()
+  const field = searchField(render())
+  assert.ok(field, 'the tree must offer a search field')
+  assert.match(field.props.placeholder, /搜索文件名/)
+  assert.equal(field.props['aria-label'], '搜索文件名')
+
+  field.props.onChange({ target: { value: 'config' } })
+  await flush()
+  const request = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/search')
+  assert.ok(request, JSON.stringify(rpcLog))
+  assert.deepEqual(request.args, { rootDir: 'D:/ws', query: 'config', sessionId: 'session-1' })
+
+  let tree = render()
+  const hits = searchHits(tree)
+  // Both roots answer: the additional one lies outside the session root, so it
+  // is exactly the folder a single-root search would miss.
+  assert.deepEqual(hits.map((hit) => hit.props['data-search-hit']), ['src/config.ts', 'config.json'])
+  assert.match(textOf(tree), /2 个结果/)
+  assert.match(textOf(hits[0]), /config\.ts/)
+  // A hit says which folder it came from; at the root there is no parent part.
+  assert.match(textOf(hits[1]), /Other/)
+  // A query REPLACES the tree: the folder rows are not on screen while it is typed.
+  assert.equal(nodesWhere(tree, (node) => node.props && node.props['data-root-path'] === 'D:/ws').length, 0)
+
+  hits[1].props.onClick()
+  assert.deepEqual(opened, [{ sessionId: 'session-1', address: 'dsh-resource://file/session/session-1/D:/other/config.json' }])
+})
+
+test('the arrow keys pick a search row, Enter opens it, and Escape restores the tree', async () => {
+  const { opened, render } = await bootSearch()
+  searchField(render()).props.onChange({ target: { value: 'config' } })
+  await flush()
+
+  // The first row is selected by default, so Enter alone opens it.
+  let tree = render()
+  assert.equal(searchHits(tree)[0].props['data-selected'], 'true')
+
+  const consume = (key) => {
+    let prevented = false
+    searchField(render()).props.onKeyDown({ key, preventDefault() { prevented = true } })
+    return prevented
+  }
+  assert.equal(consume('ArrowDown'), true, 'the field owns the arrow keys while searching')
+  tree = render()
+  assert.equal(searchHits(tree)[0].props['data-selected'], undefined)
+  assert.equal(searchHits(tree)[1].props['data-selected'], 'true')
+
+  consume('Enter')
+  assert.equal(opened.length, 1)
+  assert.match(opened[0].address, /config\.json$/)
+
+  consume('Escape')
+  tree = render()
+  assert.equal(searchHits(tree).length, 0, 'Escape clears the query')
+  assert.ok(nodesWhere(tree, (node) => node.props && node.props['data-root-path'] === 'D:/ws').length > 0, 'the folder tree comes back')
+})
+
+test('an empty answer and a failed search each say so in place of the list', async () => {
+  const empty = await bootSearch({ answer: { rootDir: 'D:/ws', roots: STATE.roots, query: 'zzz', files: [], total: 0, truncated: false } })
+  searchField(empty.render()).props.onChange({ target: { value: 'zzz' } })
+  await flush()
+  assert.match(textOf(empty.render()), /没有匹配的文件/)
+  assert.equal(searchHits(empty.render()).length, 0)
+
+  const failed = await bootSearch({ fail: true })
+  searchField(failed.render()).props.onChange({ target: { value: 'config' } })
+  await flush()
+  const alerts = nodesWhere(failed.render(), (node) => node.props && node.props.role === 'alert')
+  assert.equal(alerts.length, 1)
+  assert.match(textOf(alerts[0]), /搜索失败/)
+  assert.match(textOf(alerts[0]), /boom/)
+})
+
+test('a capped index says the answer may be incomplete', async () => {
+  const { render } = await bootSearch({ answer: Object.assign({}, SEARCH_ANSWER, { truncated: true }) })
+  searchField(render()).props.onChange({ target: { value: 'config' } })
+  await flush()
+  assert.match(textOf(render()), /索引已达上限/)
 })
 
 // ------------------------------------ file operations from the workspace tree
@@ -2471,44 +2655,74 @@ test('a folder row can create at the workspace root', async () => {
 })
 
 
-test('the new-workspace-file button opens an inline name field, not a prompt', async () => {
+test('the manager new-workspace-file button opens an inline name field, not a prompt', async () => {
   // `window.prompt` does not exist in the Desktop renderer, so the old button
-  // threw and looked dead. The form is a store flag plus a field now, and the
-  // name travels on the command channel like every other folder mutation.
-  const { view, commandLog } = await boot()
+  // threw and looked dead. The form is a store flag plus a field now, and its
+  // target is the directory of the file the manager list marks active — which
+  // is the FILE's directory, not the workspace root it happens to derive.
+  const nested = Object.assign({}, STATE, {
+    rootDir: 'D:/ws',
+    fileDir: 'D:/home/workspace',
+    file: 'D:/home/workspace/api.code-workspace',
+  })
+  const { view, panel, rpcLog } = await boot({
+    onRpc: (endpoint) => {
+      if (endpoint === 'codeWorkspace/create') {
+        return ok(Object.assign({}, nested, { workspace: { id: 'w9', path: 'D:/home/workspace', title: 'my-app' } }))
+      }
+      if (endpoint === 'codeWorkspace/recent') return ok({ files: [] })
+      if (endpoint === 'codeWorkspace/editors') return ok({ editors: [], preferred: null, ssh: false, platform: 'win32' })
+      return ok(nested)
+    },
+    onCommand: () => commandOk(nested),
+  })
+  // The view names the active file; the manager inherits that scope.
   expand(view.component(kit()))
   await flush()
-  let tree = expand(view.component(kit()))
+  expand(panel.component({}))
+  await flush()
+  let tree = expand(panel.component({}))
   buttonByLabel(tree, '新建工作区文件').props.onClick()
-  tree = expand(view.component(kit()))
+  tree = expand(panel.component({}))
   const field = inputsIn(tree).find((input) => input.props['data-field'] === 'create-name')
-  assert.ok(field, 'clicking the button must reveal the name field')
+  assert.ok(field, 'clicking the button must reveal the name field — text: ' + textOf(tree))
+  assert.match(textOf(tree), /D:\/home\/workspace/, 'the form must name the directory it writes into')
   field.props.onChange({ target: { value: 'my-app' } })
-  tree = expand(view.component(kit()))
+  tree = expand(panel.component({}))
   buttonByLabel(tree, '创建').props.onClick()
   await flush()
-  assert.ok(commandLog.some((call) => call.line === '/code-workspace create "my-app"'), JSON.stringify(commandLog))
+  const create = rpcLog.find((entry) => entry.endpoint === 'codeWorkspace/create')
+  assert.ok(create, JSON.stringify(rpcLog))
+  assert.deepEqual(create.args, { rootDir: 'D:/home/workspace', name: 'my-app' })
 })
 
-test('the pickers open under the action row, not at the foot of the page', async () => {
-  // Below the fold they read as buttons that do nothing; the section has to be
-  // where the click was, which here means before the folder list.
+test('the manager picker opens under the section header, not at the foot of the list', async () => {
+  // Below the fold they read as buttons that do nothing; the picker has to be
+  // where the click was, which here means above the list it would otherwise
+  // push past the viewport.
   const listing = { path: 'D:/ws', parent: 'D:/', home: 'C:/Users/edy', entries: [], truncated: false }
-  const { view } = await boot({
+  const { view, panel } = await boot({
     onRpc: (endpoint) => {
       if (endpoint === 'codeWorkspace/browse') return ok(listing)
+      if (endpoint === 'codeWorkspace/recent') {
+        return ok({ files: [{ file: 'D:/ws/app.code-workspace', fileDir: 'D:/ws', title: 'app', exists: true, missing: false }] })
+      }
       return ok(STATE)
     },
   })
   expand(view.component(kit()))
   await flush()
-  let tree = expand(view.component(kit()))
-  buttonByLabel(tree, '切换文件').props.onClick()
+  expand(panel.component({}))
   await flush()
-  tree = expand(view.component(kit()))
-  const text = textOf(tree)
-  assert.match(text, /浏览目录/)
-  assert.ok(text.indexOf('浏览目录') < text.indexOf('工作区文件夹'), 'the picker precedes the folder list — text: ' + text)
+  buttonByLabel(expand(panel.component({})), '切换文件').props.onClick()
+  await flush()
+  const tree = expand(panel.component({}))
+  const flat = nodesWhere(tree, () => true)
+  const browseTitle = flat.find((node) => node.type === 'h2' && textOf(node) === '浏览目录')
+  const listRow = flat.find((node) => node.props && node.props.title === 'D:/ws/app.code-workspace')
+  assert.ok(browseTitle, 'the browser must render — text: ' + textOf(tree))
+  assert.ok(listRow, 'the list must still render')
+  assert.ok(flat.indexOf(browseTitle) < flat.indexOf(listRow), 'the picker sits between the header and the list')
 })
 
 test('recent rows carry the platform file-type icon, and survive without it', async () => {
@@ -2528,10 +2742,12 @@ test('recent rows carry the platform file-type icon, and survive without it', as
   const props = kit()
   expand(opened.view.component(props))
   await flush()
-  let tree = expand(opened.view.component(props))
+  expand(opened.panel.component({}))
+  await flush()
+  let tree = expand(opened.panel.component({}))
   buttonByLabel(tree, '最近使用').props.onClick()
   await flush()
-  tree = expand(opened.view.component(props))
+  tree = expand(opened.panel.component({}))
   const typed = nodesWhere(tree, (node) => node.props && node.props['data-file-type'] !== undefined)
   assert.equal(typed.length, 1, 'the recent row must ask the platform for the file type')
   assert.equal(typed[0].props['data-file-type'], 'D:/ws/app.code-workspace')
@@ -2544,10 +2760,12 @@ test('recent rows carry the platform file-type icon, and survive without it', as
   })
   expand(bare.view.component(props))
   await flush()
-  let bareTree = expand(bare.view.component(props))
+  expand(bare.panel.component({}))
+  await flush()
+  let bareTree = expand(bare.panel.component({}))
   buttonByLabel(bareTree, '最近使用').props.onClick()
   await flush()
-  bareTree = expand(bare.view.component(props))
+  bareTree = expand(bare.panel.component({}))
   assert.equal(nodesWhere(bareTree, (node) => node.props && node.props['data-file-type'] !== undefined).length, 0)
   assert.match(textOf(bareTree), /app/, 'the row still renders without the primitives')
 })
@@ -2584,18 +2802,18 @@ test('the identity card folds its details and keeps the folder tree', async () =
   expand(view.component(kit()))
   await flush()
   let tree = expand(view.component(kit()))
-  assert.match(textOf(tree), /新建工作区文件/, 'the details start expanded')
+  assert.match(textOf(tree), /工作区根目录/, 'the details start expanded')
 
   buttonByTitle(tree, '收起详情').props.onClick()
   tree = expand(view.component(kit()))
-  assert.doesNotMatch(textOf(tree), /新建工作区文件/, 'the action row folds away')
-  assert.doesNotMatch(textOf(tree), /工作区根目录/, 'so do the paths')
+  assert.doesNotMatch(textOf(tree), /工作区根目录/, 'the paths fold away')
   assert.match(textOf(tree), /工作区文件夹/, 'the folder tree stays')
+  assert.match(textOf(tree), /在资源管理器中显示/, 'the title row keeps its file utility')
   assert.ok(buttonByTitle(tree, '展开详情'), 'the title row keeps its chevron')
 
   buttonByTitle(tree, '展开详情').props.onClick()
   tree = expand(view.component(kit()))
-  assert.match(textOf(tree), /新建工作区文件/, 'and back again')
+  assert.match(textOf(tree), /工作区根目录/, 'and back again')
 })
 
 test('the folder row puts its caret on the column the tree measures from', async () => {

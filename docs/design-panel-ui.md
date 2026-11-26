@@ -52,7 +52,7 @@
 | --- | --- | --- | --- |
 | C1 | 每个文件夹行 6 个图标按钮（`>_ ↑ ↓ ✎ ⧉ ✕`）同尺寸、同权重、无分组；`✕`（移除）紧贴 `⧉`（显示） | 动作平铺、无分组、无 tooltip 可见性 | 三组：终端 · 排序/编辑 · 危险；组间 1px 竖线；全部 28×28 图标按钮，`title` 即 tooltip（§4.6） |
 | C2 | 「最近使用」「切换文件」等 6 个动作挤在一行（`1909-1916`），「取消关联」混在其中 | 没有主/次/危险层级 | 主操作 = 添加文件夹（实心）；切换文件 = 描边；其余 = ghost；取消关联 = 红色文字 + 危险 hover（§4.4） |
-| C3 | 移除文件夹**没有二次确认**（`1988` 直接 `mutate('remove …')`） | 缺确认 | 移除文件夹、页面级取消关联都先 `window.confirm`（§4.6 / §4.4） |
+| C3 | 移除文件夹**没有二次确认**（`1988` 直接 `mutate('remove …')`） | 缺确认 | 移除文件夹、管理器行记录移除都先 `window.confirm`（§4.6 / §4.12） |
 | C4 | 没有滚动容器：文件夹多时把「添加文件夹」和编辑器支行挤出首屏 | 页面只有外层滚动 | 文件夹列表 `max-height: 400px; overflow-y: auto`（§3.5） |
 | C5 | 两个输入框只有 placeholder，输入后不知道字段是什么（`2001-2016`） | 无可见标签 | 标签在上方，placeholder 改成示例（§4.7） |
 
@@ -112,10 +112,10 @@ rc.5 自己的 CSS（`RC5/dsh-client-ui-theme/src/styles/*.css`、`RC5/dsh-clien
 1. **先回答「我在哪个工作区」，再给动作**：H1 = 文件名，路径 = 副标题，元信息 = 定义栅格；
    动作永远在事实之后。
 2. **一个分区一个职责，同一视区一个主按钮**：有文件时唯一实心按钮是「添加文件夹」（未关联文件时是
-   空状态的「切换文件」）；「切换文件」其余场合是描边；其余是 ghost；「取消关联 / 移除」是危险动作，
+   空状态的「切换文件」）；「切换文件」其余场合是描边；其余是 ghost；「移除 / 记录 ✕」是危险动作，
    永远与普通动作分开。
-3. **危险动作不与常用动作相邻**：`✕` 与排序/编辑之间隔 1px 竖线 + 6px；页面级「取消关联」
-   被 `margin-left: auto` 推到行尾，并先确认。
+3. **危险动作不与常用动作相邻**：`✕` 与排序/编辑之间隔 1px 竖线 + 6px；管理器行的记录 `✕`
+   在行尾、单独确认。详情卡不再有页面级「取消关联」：它写的是根的墓碑，却长得像会话动作。
 4. **信息密度靠字号与留白分层，不靠加框**：卡片只用在「一组数据」（标识、文件夹、管理器、
    冲突、最近、浏览）；动作行、编辑器按钮不加卡片。
 5. **状态可读、可恢复**：任何失败给出「发生了什么 + 下一步」，成功用 success tone；
@@ -151,13 +151,12 @@ rc.5 自己的 CSS（`RC5/dsh-client-ui-theme/src/styles/*.css`、`RC5/dsh-clien
 │ │            （两个 Banner 之间 8px；与下一分区之间 24px）                          │ │
 │ │                                                                                  │ │
 │ │  ┌ 卡片：工作区标识  padding 16 / radius 12 / gap 12 ────────────────────────┐   │ │
-│ │  │ [18px 图标] H1 合同重构-放弃低代码.code-workspace     处理中…  [⟳]        │   │ │
+│ │  │ [18px 图标] H1 合同重构-放弃低代码.code-workspace  [VS Code] [在资源管理器中显示] [⟳] │   │ │
 │ │  │ D:/home/workspace/合同重构-放弃低代码.code-workspace            [⧉复制]    │   │ │
 │ │  │ ───────────────────── 0.5px hairline ─────────────────────                │   │ │
 │ │  │ 工作区根目录   D:/home/hwpro/sop_hetong   [已注册]            [⧉复制]     │   │ │
 │ │  │ 文件所在目录   D:/home/workspace                              [⧉复制]     │   │ │
-│ │  │ ───────────────────── 0.5px hairline ─────────────────────                │   │ │
-│ │  │ [切换文件] [新建工作区文件] [最近使用] [在资源管理器中显示]   [取消关联]   │   │ │
+│ │  │ （动作行通常不存在；文件已注册为 DSH 工作区时才有 [打开该工作区]）          │   │ │
 │ │  └──────────────────────────────────────────────────────────────────────────┘   │ │
 │ │                                                                                  │ │
 │ │  [warn Banner：无法解析该工作区文件]      ← 仅 value.error；不可关闭             │ │
@@ -195,9 +194,10 @@ rc.5 自己的 CSS（`RC5/dsh-client-ui-theme/src/styles/*.css`、`RC5/dsh-clien
 
 ### 3.3 线框（panel：左栏入口打开的 `main` 页，`ManagerBody`）
 
-**这一页不画标识卡片。** 它的主体是管理器列表（§4.12），因为卡片上的每个动作
-（取消关联 / 新增文件夹 / 项目终端）都是「对本会话说的话」，而这一页按设计没有会话：
-照搬过来只能变成全局语义，并且会把列表挤出首屏。
+**这一页不画标识卡片。** 它的主体是管理器列表（§4.12），因为卡片上还剩的动作
+（新增文件夹 / 项目终端）都是「对本会话说的话」，而这一页按设计没有会话：
+照搬过来只能变成全局语义，并且会把列表挤出首屏。但「切换文件 / 新建工作区文件 /
+最近使用」不是会话动作，而是**工作区文件自己的动作**，所以它们在这一页，不在详情卡。
 
 ```
 ┌ 外层：flex 居中，overflow:auto，scrollbar-gutter:stable ─────────────────────────────┐
@@ -205,22 +205,29 @@ rc.5 自己的 CSS（`RC5/dsh-client-ui-theme/src/styles/*.css`、`RC5/dsh-clien
 │ │                                                                                  │ │
 │ │  [error Banner] / [notice Banner]   ← 仅在读或写失败/有回执时                     │ │
 │ │                                                                                  │ │
-│ │  代码工作区 · N                       [切换文件] [从资源管理器选择…] [⟳]         │ │
+│ │  代码工作区 · N  [切换文件] [新建工作区文件] [最近使用] [从资源管理器选择…] [⟳]  │ │
+│ │  ┌ 新建表单（条件）──────────────────────────────────────────────────────────┐  │ │
+│ │  │ 位置  D:/ws                                                               │  │ │
+│ │  │ [文件名…] [创建] [取消]                                                    │  │ │
+│ │  └────────────────────────────────────────────────────────────────────────────┘  │ │
+│ │  ┌ 浏览目录（条件，点「切换文件」后）─────────────────────────────────────────┐  │ │
+│ │  │ 工具栏 + 路径 + 列表（maxHeight 260 滚动）                                  │  │ │
+│ │  └────────────────────────────────────────────────────────────────────────────┘  │ │
 │ │  ┌ 卡片：已记录 .code-workspace 列表（行 48px，gap 2，padding 8）…            ┐   │ │
 │ │  │ ◆ app         [已注册]                                   D:/ws        [✕] │   │ │
 │ │  │    D:/ws                                                                   │   │ │
 │ │  └────────────────────────────────────────────────────────────────────────────┘   │ │
-│ │                                                                                  │ │
-│ │  浏览目录                                                        [✕]             │ │
-│ │  ┌ 卡片：工具栏 + 路径 + 列表（maxHeight 260 滚动）………………………………          │   │ │
-│ │                                                                                  │ │
 │ └──────────────────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- 动作只有三个，全部挤在分区标题右端（`SectionHeader.action`）：切换文件（primary）、
-  从资源管理器选择…（ghost）、⟳（图标）。**没有**新建工作区文件（需要一个目录）、
-  没有取消关联、没有编辑器按钮、没有文件夹区与终端提示。
+- 动作全在分区标题右端（`SectionHeader.action`）：切换文件（primary）、新建工作区文件、
+  最近使用、从资源管理器选择…（ghost）、⟳（图标）。**没有**取消关联、编辑器按钮、
+  文件夹区与终端提示。
+- 新建表单与浏览目录都渲染在标题与列表之间（`WorkspaceList` 的 `form` / `picker`），
+  不在列表下面：列表可以比视口长，挂在下面就会让按钮看起来"按了没反应"。
+- 「最近使用」不是第二个列表：点它把列表区**就地换成**最近使用列表（§4.10），
+  分区头的 ✕ 回到工作区列表。页面上永远只有一份行。
 - 列表每次打开都强制重读（`loadRecent(true)`），所以不会显示别处改动之前的旧状态。
 - 没关联任何文件时也**不**画「未关联」空状态卡片：这一页没有"会话状态"可讲，
   空列表本身就是空状态（卡片内 `empty.workspaces` 一行）。
@@ -249,15 +256,16 @@ rc.5 自己的 CSS（`RC5/dsh-client-ui-theme/src/styles/*.css`、`RC5/dsh-clien
 | 1 | error Banner | error Banner | error Banner |
 | 2 | notice Banner | notice Banner | notice Banner |
 | 3 | 标识卡片 / 空状态 / 加载卡片 | **代码工作区（管理器，含工具组）** | 同左 |
-| 4 | 工作区文件夹 | 浏览目录（条件） | 工作区文件夹 |
-| 5 | 冲突区 | — | 冲突区 |
+| 4 | 工作区文件夹 | 新建表单 / 浏览目录（条件，在列表之上） | 工作区文件夹 |
+| 5 | 冲突区 | 最近使用列表（`managerRecent`，替换位置 3–4） | 冲突区 |
 | 6 | 在编辑器中打开 | — | 在编辑器中打开 |
-| 7 | 最近使用 | — | 最近使用 |
+| 7 | ——（最近使用已移入管理器页） | — | 最近使用 |
 | 8 | 浏览目录 | — | 浏览目录 |
 | 9 | — | — | — |
 
-panel 不再是「view 加一个分区」：它的根节点是 `ManagerBody`，只看列表和浏览器；
-`PanelBody` 只服务 view 与 overlay（标识卡片 / 文件夹 / 冲突 / 编辑器 / 最近 / 浏览）。
+panel 不再是「view 加一个分区」：它的根节点是 `ManagerBody`，只看列表、它的表单 / 浏览器，
+以及管理器页自己的最近列表；`PanelBody` 只服务 view 与 overlay（标识卡片 / 文件夹 / 冲突 /
+编辑器 / 最近 / 浏览）。view 的最近区已随「最近使用」动作一起移走。
 
 ---
 
@@ -420,6 +428,8 @@ actions: display flex, gap 8, flexWrap wrap, marginTop 4
 | 图标 | 复用 `WorkspacePanelIcon`（`lib/client.js:2385-2416`），尺寸 18，颜色 `TOKEN.labelFaint`，`flex:'none'` |
 | `h1` | 文件名 = `value.file ? lastSegment(value.file) : t('title.none')`（`lastSegment` 见 `lib/client.js:3306-3309`）；`fontSize 16, lineHeight '24px', fontWeight 500, color TOKEN.label`；`flex:1; minWidth:0`；`overflow:hidden; textOverflow:ellipsis; whiteSpace:nowrap`；`title = value.file` |
 | busy 文本 | `snapshot.busy` 时在右侧：`status.working`，12/18，`TOKEN.labelFaint`，`flex:'none'` |
+| 编辑器按钮 | `EditorButtons`：每个可证明的 VS Code 家族一个 `outline` 小按钮（height 24），`flex:none` |
+| 在资源管理器中显示 | 仅 `inView && value.file`：`Button variant="outline"`，height 24，紧挨编辑器按钮（文件工具和编辑器按钮是同一类，不该单独占一行）；浮层仍放在动作行里（430px 标题行没宽度） |
 | 刷新按钮 | `IconButton` 字符 `⟳`，`title = action.refresh`，`disabled = busy` |
 | 关闭按钮 | 仅 `!inView`（overlay）：`IconButton` 字符 `✕`，`title = action.close`，`onClick = closePanel` |
 
@@ -436,16 +446,23 @@ actions: display flex, gap 8, flexWrap wrap, marginTop 4
 
 **动作行**：`display:flex; flexWrap:wrap; alignItems:center; gap:8`
 
+对话视图通常**没有动作行**：切换 / 新建 / 最近在工作区文件自己的管理器页（§4.12）；
+「在资源管理器中显示」在标题行；「取消关联」已删除（它写的是根的墓碑，见 §4.4）。
+浮层（新建会话页的挑选器）仍画前三个 + reveal：
+
 | 顺序 | 按钮 | variant | 出现条件 | 行为（沿用现有函数） |
 | --- | --- | --- | --- | --- |
-| 1 | `action.openOther`（切换文件） | `outline` | `value` 存在 | `patch({showBrowse:true}); browseTo(fileBrowseStart())`（`lib/client.js:1910`） |
-| 2 | `action.create`（新建工作区文件） | `ghost` | 同上 | `patch({showRecent:false}); createFile()`（`:1914`） |
-| 3 | `action.recent`（最近使用） | `ghost` + `ariaPressed = snapshot.showRecent` | 同上 | `patch({showRecent: !showRecent}); loadRecent(true)`（`:1911`） |
-| 4 | `action.reveal`（在资源管理器中显示） | `ghost` | `value.file` 存在 | `reveal(value.file)`（`:1912`） |
-| 5 | `action.useWorkspace`（打开该工作区） | `ghost` | `value.workspace` 存在 | `enterWorkspace(value)`（`:1913`） |
-| 6 | `action.forget`（取消关联） | `ghost` + `danger`，`marginLeft:'auto'` | 总是（`value` 存在） | 先 `window.confirm(t('confirm.unlink'))`，确认后 `mutate('use ""', 'useFile', {file:''})`（`:1915`） |
+| 1 | `action.openOther`（切换文件） | `outline` | 仅浮层，`value` 存在 | `patch({showBrowse:true}); browseTo(fileBrowseStart())`（`lib/client.js:1910`） |
+| 2 | `action.create`（新建工作区文件） | `ghost` | 仅浮层，同上 | `patch({showRecent:false}); createFile()`（`:1914`） |
+| 3 | `action.recent`（最近使用） | `ghost` + `ariaPressed = snapshot.showRecent` | 仅浮层，同上 | `patch({showRecent: !showRecent}); loadRecent(true)`（`:1911`） |
+| 4 | `action.reveal`（在资源管理器中显示） | `ghost` | 仅浮层，`value.file` 存在 | `reveal(value.file)`（`:1912`） |
+| 5 | `action.useWorkspace`（打开该工作区） | `ghost` | `value.workspace` 存在（view / overlay） | `enterWorkspace(value)`（`:1913`） |
 
-按钮语义排序是为了「主/次/导航/危险」四层；`disabled = snapshot.busy`（危险动作也一样）。
+按钮语义排序是为了「主/次/导航」三层；`disabled = snapshot.busy`。
+动作行为空（`actions` 为 `null`）时整行不渲染：一张写着「未关联」或只有一条路径的卡片，
+不该为不存在的动作留一条空行。
+详情卡的动作行**不**出现切换 / 新建 / 最近：它们属于管理器页（§4.12），在「这个会话正用
+哪个文件」的卡片上重复一遍，等于给同一件事画了第二个入口。
 
 ### 4.3 元信息区
 
@@ -466,15 +483,16 @@ actions: display flex, gap 8, flexWrap wrap, marginTop 4
 | 层级 | 组件 | 出现位置 | 视觉 |
 | --- | --- | --- | --- |
 | 主 | `添加文件夹` | 添加表单 | `primary` 实心（`button-primary-fill` + 白字） |
-| 次（第一层） | `切换文件`、`上级`、每个编辑器按钮 | 标识卡片动作行 / 浏览工具栏 / 编辑器分区 | `outline` 描边 |
-| 次（第二层） | `新建工作区文件`、`最近使用`、`在资源管理器中显示`、`打开该工作区`、`新建文件夹`、`从资源管理器选择` | 动作行 / 浏览工具栏 | `ghost` |
+| 次（第一层） | `切换文件`、`上级`、每个编辑器按钮、`在资源管理器中显示`（view 标题行） | 标题行 / 管理器工具组 / 浏览工具栏 / 编辑器分区 | `outline` 描边 |
+| 次（第二层） | `新建工作区文件`、`最近使用`、`在资源管理器中显示`（浮层）、`打开该工作区`、`新建文件夹`、`从资源管理器选择` | 动作行 / 浏览工具栏 | `ghost` |
 | 行内 | 终端、上移、下移、重命名、显示、移除 | 文件夹行 | `IconButton` 28 |
 | 行内（弱） | 复制路径、关闭区段、关闭 Banner | 路径行 / 分区标题 / Banner | `IconButton` 24 |
-| 危险 | `取消关联`（页面级）、`移除`（文件夹）、`取消关联`（记录） | 动作行 / 行尾部 / 管理器行 | `danger` + 确认 |
+| 危险 | `移除`（文件夹）、`取消关联`（记录） | 行尾部 / 管理器行 | `danger` + 确认 |
 
 - **不得**在同一视区出现两个 `primary`：有文件时唯一主按钮是「添加文件夹」；未关联文件时没有添加表单，
   空状态里的「切换文件」才是主按钮（二者不会同时渲染）。
-- 危险动作必须与普通动作分开：页面级靠 `marginLeft:auto`；行级靠分隔线 + 6px 组间距。
+- 危险动作必须与普通动作分开：行级靠分隔线 + 6px 组间距；管理器行 `✕` 在行尾。
+  页面级「取消关联」已删除：它写的是根的墓碑（全局），却放在「本会话」的卡片上。
 
 ### 4.5 错误 / 提示条
 
@@ -674,6 +692,47 @@ display flex, alignItems center, gap 2, flex:'none'
   宿主按「会话根 + 文件声明的根」做包含校验，根目录自身只能作为「新建的父目录」，不能重命名或删除，
   工作区文件本身也不可改名/删除。
 
+#### 4.6.10 文件名搜索（树上方）
+
+**问题**：树只能一层层展开去找文件。多根工作区里同名文件很多（`index.ts`），而附加根在内置「文件」页里根本不出现，
+所以「我知道文件名，帮我打开它」在这页上没有入口。
+
+**位置**：`FolderList` 卡片内容的最上方、树的上方一行：`⌕` + `TextInput`（`data-field="search-files"`，
+高 28、字号 12.5）+ 有查询时的 `✕`（`action.clearSearch`）。字段始终在，不是 hover 才出现——它是这一页的
+第二个入口，不是树的行内动作。查询非空时**命中列表取代树**（不是过滤树）：问题关于整个工作区，答案必须包含
+没展开过的目录，而「根都还在原位」会让「哪些是命中」变得含糊。`Esc` / `✕` 清空后树原样回来（展开状态一直在 store 里，没动过）。
+
+**数据**：每次按键调 `codeWorkspace/search`（`rootDir`、`query`、可选 `sessionId`），**不在浏览器里放索引**：
+宿主已经有 `@` 发现用的那一份有上限（20000）、带 4s 缓存、跳过 `node_modules`/`.git` 等目录的索引，第二份索引
+只会在两边漂移。宿主侧 `indexFor` 还做了**并发合流**（同一 stamp 的进行中遍历共享一个 promise），否则连续按键
+会在第一次遍历结束前各起一次全树遍历。**没有 `.code-workspace` 文件的会话照样能搜**：宿主退回会话根那一份索引
+（缓存键 `single:<root>`），和树用 `singleFolderRoot` 画出的单文件夹工作区一致——漏掉这一半就会出现「树里列着文件、
+输入框说没有匹配」的情况。响应 `{ rootDir, roots, files[], total, truncated, query }`，
+`files[]` 的每项是 `{ path, rel, name, rootPath, rootLabel, dir:false }`。
+
+**排序（宿主 `rankByFileName`）**：只认**文件名**——完全相等 1000 > 前缀 900 > 词首命中 800 > 词中命中 720 >
+子串/子序列（按跨度扣分）> 查询里写了 `/` 时改按 `rel` 匹配。同分按路径长度、再按字典序，结果稳定。
+**目录永不进结果**（这份名单回答「哪个文件」）；**点开头的文件算真文件**——树里画着 `.gitignore`，所以 `git` 必须能找到它，
+否则输入框只认识屏幕上一半的东西（这条是实测反馈后改的，最初沿用了 `@` 的隐藏规则）；同等质量下可见文件仍排在隐藏文件前
+（`-30`），树本来就不列的目录（`node_modules`、`.git` 自身等）根本不在索引里。上限 50 条（`MAX_SEARCH_RESULTS`）。
+
+**交互**：
+
+- 输入即在字段里打字；`↑`/`↓` 移 `searchCursor`（钳在 0..n-1），`Enter` 打开当前行（没有结果时什么都不做），
+  `Esc` 清空并回到树。`TextInput` 的 `onKeyDown` 因此多了一个「字段自己消费了就返回 true」的口子：
+  箭头键要 `preventDefault`，否则光标会在输入框里跳。
+- 行 = `button[data-search-hit="<rel>"]`，选中行 `data-selected="true"` 并有 `TOKEN.hover` 底色（内联样式
+  表达不了 `:hover`，所以键盘行就是唯一高亮行，也正是 Enter 会打开的那行）；悬停也会把 cursor 移过去。
+  行内：`FileTypeGlyph` + 文件名 + `rootLabel · 父目录`（灰、`maxWidth:45%`、省略号）；有 `onQuote` 时右侧
+  常驻 `⤴`（搜索结果是「我已经知道是哪个文件」的状态，不需要 hover 才给引用入口）。
+- 点击/Enter → `openWorkspaceFile(sessionId, rootDir, path)`，与树行同一条路：同一个右侧栏预览、
+  同样 `patch({ compact: true })` 让管理区折叠。
+- 空态三种：`hint.searchLoading`（首次在遍历）、`hint.searchEmpty`（`files` 空）、`error.search`（`role="alert"`，
+  带宿主消息）。有结果时列表上方一行 `label.searchCount`（`{count} 个结果`）；宿主报告 `truncated` 时再加一行
+  `hint.searchTruncated`（`TOKEN.warn`）——索引被上限截断这件事不能悄悄发生。
+- 失效：切会话 / 切根（`syncPanelScope`）、打开另一个工作区文件（`openFile`）、重开面板（`openPanel`）都清空
+  `search*` 并 `searchSeq += 1`。序号守卫是必须的：答案回来得比下一次输入慢时，旧答案会把新查询的结果盖掉。
+
 ### 4.7 添加文件夹表单
 
 入口：分区**头部行右端**的 `＋ 新增文件夹`（`Button variant="ghost"`，高 24、`marginLeft:'auto'`、
@@ -763,19 +822,33 @@ display flex, alignItems center, gap 2, flex:'none'
 ### 4.12 代码工作区管理器（panel 页的全部内容）
 
 - 位置：`ManagerBody`（左栏 `main` 页），**不是** `PanelBody` 的一个变体；`PanelBody` 只服务
-  view / overlay。panel 不再画标识卡片、文件夹区、冲突区、编辑器按钮与最近使用区。
+  view / overlay。panel 不画标识卡片、文件夹区、冲突区、编辑器按钮与详情卡的动作行；
+  它接管了详情卡原来的三个**文件级**动作：切换 / 新建 / 最近使用。
 - 根节点：`h('div',{role:'main','aria-busy':busy,...})`，`gap: 16`；子节点 = 两个 Banner（§4.11）
-  + 管理器分区（+ 浏览目录分区，条件）。
+  + 管理器分区（含表单 / 浏览 / 最近三种条件子块）。
 - `SectionHeader`：`label.workspaces`（代码工作区）+ `label.workspaceCount`（`{count} 个文件`）+
-  **右端工具组**（`ManagerTools`，一个 `div` 内三个控件，gap 6，`flex:none`）：
-  - `切换文件`：`Button variant="primary"`，`disabled = busy`，点击 `patch({showRecent:false})` 后
+  **右端工具组**（`ManagerTools`，一个 `div` 内五个控件，`columnGap:6, rowGap:6, flexWrap:'wrap', flex:none`，窄窗口下换行而不是溢出）：
+  - `切换文件`：`Button variant="primary"`，`disabled = busy`，点击 `patch({managerRecent:false, creating:false, showBrowse:true})` 后
     `browseTo(fileBrowseStart())`；
+  - `新建工作区文件`：`Button`（ghost），`ariaPressed = snapshot.creating`，
+    目录 = `managerCreateDir()`；目录为空时 `disabled`，`title` 写 `hint.managerCreate`，
+    否则 `title` 就是落点目录。点击开 `CreateFileForm`（`dir` / `showTarget`），表单先画
+    「位置 + 目录」再画名称字段；
+  - `最近使用`：`Button`（ghost），点击 `patch({managerRecent:true, showBrowse:false, creating:false})` + `loadRecent(true)`；
   - `从资源管理器选择…`：`Button`（ghost），点击 `pickNativeFile`；
   - `⟳`：`IconButton`，`title = action.refresh`，点击 `loadRecent(true)` + `refresh()`。
-  - **没有** `新建工作区文件`（新建需要一个目录，这一页没有会话可提供）、没有取消关联、
-    没有编辑器按钮：它们都属于会话面，留在 view / overlay。
+  - **没有**编辑器按钮：它属于会话面，留在 view / overlay；也**没有**页面级「取消关联」：
+    记录移除就是每行的 `✕`。
+- `managerCreateDir()`：`snapshot.snapshot.fileDir`（列表标为当前的那一行所在目录）→
+  `state.rootDir`（页面的作用域根；`WorkspacePanel` 取**当前会话 cwd**，没有当前会话时才用
+  store 里上次打开的根）→ `''`。**不**猜第一个文件，也不悄悄写 home。
+- 子块顺序（`WorkspaceList` 内）：分区标题 → `form`（`creating` 时）→ `picker`（`showBrowse` 时）→ 列表卡片。
+  都放在列表**上面**，因为列表可能比视口长，挂在下面就成了"按了没反应的按钮"。
+- `managerRecent` 为真时，`ManagerBody` 不画列表，改画 `RecentSection`（§4.10，`onClose` 回写
+  `managerRecent:false`）；页面此时没有工具组，也不会同时出现两张列表。
 - 数据：`snapshot.recent`（已记录文件）+ `readOpenWorkspaces()`（已注册工作区）。
-- 挂载时 `loadRecent(true)`（强制重读）+ `refresh()`：列表是这一页的全部内容，不能显示别处改动之前的旧缓存。
+- 挂载时 `loadRecent(true)`（强制重读）+ `refresh()`，并清掉其它面留下的
+  `managerRecent / creating / showBrowse / showRecent`：列表是这一页的全部内容，不能显示别处改动之前的旧缓存。
 - 卡片（padding 8，行 gap 2）：
   - **已记录文件行**（`WorkspaceRow` 重写，替换 `lib/client.js:1592-1637`）：
     `minHeight 48, padding '6px 10px', borderRadius 8, display:flex, alignItems:center, gap:8,
@@ -804,9 +877,9 @@ display flex, alignItems center, gap 2, flex:'none'
 | 读取失败 | `snapshot.error` | error Banner（可关闭），两种主体共用 | 宿主消息已本地化/保留 |
 | 文件无法解析 | `value.error` | warning Banner（不可关闭），位于标识卡片之后（仅 view / overlay） | `warning.parse` + `value.error.message` |
 | 无文件夹 | `roots.length === 0` | 卡片内 `empty.roots` + 添加表单仍在（仅 view / overlay，且仅有工作区文件时） | `该工作区文件里还没有 folders。` |
-| 单文件夹工作区（无文件） | `value.file === null` 且 `rootDir` 存在 | 标识卡片不变（H1 = `title.none`），卡片内照常出现「工作区文件夹 · 1」分区：会话根作为唯一一行，只读（见 §4.6），可展开成目录树 | `未关联 .code-workspace 文件`、目录树 |
+| 单文件夹工作区（无文件） | `value.file === null` 且 `rootDir` 存在 | 标识卡片不变（H1 = `title.none`），卡片内照常出现「工作区文件夹 · 1」分区：会话根作为唯一一行，只读（见 §4.6），可展开成目录树。卡片没有切换 / 新建 / 最近（去管理器页），也没有取消关联（页面级已删除），动作行整行不渲染 | `未关联 .code-workspace 文件`、目录树 |
 | 无编辑器 | `editors.length === 0` | 编辑器分区一行说明（仅 view / overlay） | `hint.noEditor` 或 `hint.editorSsh` |
-| 无最近记录 | `showRecent && recent(过滤后) === []` | `empty.recent`（仅 view / overlay） | `暂无记录` |
+| 无最近记录 | 浮层 `showRecent && recent(过滤后) === []`，或 panel `managerRecent && recent(过滤后) === []` | `empty.recent`（view 不再有最近区） | `暂无记录` |
 | 浏览目录为空 | `showBrowse && entries === []` | `hint.noFile`（panel 的浏览分区同样如此） | `该目录下没有 .code-workspace 文件。` |
 | 管理器列表为空 | panel 且 `allRows.length === 0`（无已记录文件、也无已注册工作区） | `empty.workspaces` | `还没有记录过任何 .code-workspace 文件` |
 | 无终端服务 | `!shellAvailable()` | **不渲染任何终端相关文本/按钮** | —（测试 `client.test.mjs:1669` 断言终端按钮不出现） |
@@ -814,7 +887,10 @@ display flex, alignItems center, gap 2, flex:'none'
 
 ### 4.14 无文件时的浏览 / 最近使用 / 新建
 
-未关联文件时「空状态卡片」的三个动作就是唯一入口；`showBrowse` / `showRecent` 仍按 4.10 / 4.11 渲染在其后。
+未关联文件（`!rootDir`）时「空状态卡片」的三个动作仍是这一页的唯一入口；
+`showBrowse` / `showRecent` 在 **overlay** 里按 4.10 / 4.11 渲染在卡片之后，view 只在
+`!rootDir` 时把它们渲染在页面层（空状态自己的按钮打开的）。会话有根目录但没有工作区文件时，
+详情卡不再提供挑选动作：切换 / 新建 / 最近从管理器页进（§4.12）。
 overlay（430px）同样适用（测试 `client.test.mjs:578`、`:758`、`:1247-1251` 覆盖）。
 
 ---
@@ -829,6 +905,8 @@ overlay（430px）同样适用（测试 `client.test.mjs:578`、`:758`、`:1247-
 | key | zh | en | 用途 |
 | --- | --- | --- | --- |
 | `field.folderPath.hint` | `例如 D:/projects/my-app` | `e.g. D:/projects/my-app` | 路径输入框 placeholder |
+| `label.createDir` | `位置` | `Location` | 管理器新建表单里的落点目录标签（§4.12） |
+| `hint.managerCreate` | `先在列表里选中一个工作区文件；新建的文件会放在它所在目录。` | `Select a workspace file in the list first; the new file goes in its folder.` | 没有可用目录时新建按钮的 tooltip |
 | `field.folderName.hint` | `留空则显示目录名` | `Leave empty to show the directory name` | 名称输入框 placeholder |
 | `label.folderCount` | `{count} 个文件夹` | `{count} folders` | 分区标题计数（`t(..., {count})`） |
 | `label.workspaceCount` | `{count} 个文件` | `{count} files` | 管理器分区计数 |
@@ -837,11 +915,18 @@ overlay（430px）同样适用（测试 `client.test.mjs:578`、`:758`、`:1247-
 | `action.copied` | `已复制` | `Copied` | 复制成功 1.2s 的 title/aria-label |
 | `action.dragFolder` | `拖动排序` | `Drag to reorder` | 拖拽把手 title |
 | `confirm.removeFolder` | `从工作区文件里移除「{name}」？其它文件夹不受影响，之后可以重新添加。` | `Remove “{name}” from the workspace file? Other folders are unaffected, and you can add it back later.` | 行内移除确认 |
-| `confirm.unlink` | `取消关联后，本会话不再使用这个工作区文件（文件本身不会被删除）。` | `The session will stop using this workspace file. The file itself is not deleted.` | 页面级取消关联确认 |
 | `badge.workspaceFile` | `工作区文件` | `workspace file` | 浏览列表徽标 |
 | `error.terminalNoTab` | `终端打开失败：终端标签没有出现，可能被侧栏设置隐藏了。请再试一次；仍然失败就刷新页面。` | `Could not open the terminal: the terminal tab did not appear. It may be hidden by your sidebar settings. Try again, and refresh the page if it keeps failing.` | 替换裸英文（截图问题） |
 | `error.terminalNotWritable` | `终端打开失败：终端已创建，但一直没有进入可输入状态。请关闭该标签后再试。` | `Could not open the terminal: it was created but never became writable. Close that tab and try again.` | 已知失败 |
 | `error.terminalOtherSession` | `终端打开失败：终端开到了另一个会话，已关闭。请回到那个会话的「代码工作区」页签再试。` | `Could not open the terminal: it opened in another session and was closed. Open the Code Workspace tab for the right session and try again.` | 已知失败 |
+| `field.search` | `搜索文件名` | `Search file names` | 搜索框 `aria-label` / 命中列表 `role=group` 的 `aria-label` |
+| `field.search.hint` | `搜索文件名（↑↓ 选择，Enter 打开）` | `Search file names (↑↓ to pick, Enter to open)` | 搜索框 placeholder |
+| `hint.searchLoading` | `搜索中…` | `Searching…` | 首次查询在等索引 |
+| `hint.searchEmpty` | `没有匹配的文件。` | `No file matches.` | 查询无结果 |
+| `label.searchCount` | `{count} 个结果` | `{count} results` | 命中列表上方计数（`t(..., {count})`） |
+| `hint.searchTruncated` | `索引已达上限（20000 条），结果可能不全。` | `The index hit its 20 000-entry cap; results may be incomplete.` | 计数行下方的橙色提示（`TOKEN.warn`） |
+| `action.clearSearch` | `清空搜索` | `Clear search` | 搜索框右侧 `✕` 的 title / aria-label |
+| `error.search` | `搜索失败：{message}` | `Search failed: {message}` | 搜索端点报错（`role=alert`） |
 
 > `error.*` 三条都必须以「终端打开失败」开头：既有测试断言 `/终端打开失败/`（`client.test.mjs:1795`、`:1810`）。
 
@@ -874,8 +959,11 @@ overlay（430px）同样适用（测试 `client.test.mjs:578`、`:758`、`:1247-
 | `:549-550` | `主目录`、`工作区文件夹` 出现在页面文本 | 文件夹行 Badge + `label.roots` 分区标题 |
 | `:578` | `该目录下没有 .code-workspace 文件。` 出现在 **view** 树里 | 两个分支都要出这句：① `rootDir && snapshot===null && !busy` 的「无数据卡片」；② 浏览区空列表 `hint.noFile`。只保留 ② 会挂测试 |
 | `:679`、`:1076`、`:1128` | `buttonByTitle(tree, '移除')` | 文件夹行移除按钮 `title` 必须**恰好** `t('action.remove')` |
-| `:727` | `node.props.title === '取消关联'` 且点击后 `confirmations.length === 1` | 管理器行 unlink 按钮 `title` 必须**恰好** `t('action.forget')`；**页面级「取消关联」按钮不得设置同名 `title`**（否则首个匹配变成页面级按钮，点错） |
-| `:778`、`:970`、`:1010`、`:1044`、`:1211`、`:1251` | `buttonByLabel(..., '切换文件')` | 空状态与标识卡片都提供文本含「切换文件」的 `<button>` |
+| `:727` | `node.props.title === '取消关联'` 且点击后 `confirmations.length === 1` | 管理器行 `✕` 的 `title` 必须**恰好** `t('action.forget')`；详情卡不再有页面级「取消关联」，所以这个 title 在树里唯一 |
+| `:778`、`:970`、`:1010`、`:1044`、`:1211`、`:1251` | `buttonByLabel(..., '切换文件')` | 空状态、管理器页与浮层都提供文本含「切换文件」的 `<button>`；对话视图的详情卡**不**提供（见下方「the detail card leaves…」） |
+| 「the detail card leaves the file-management trio to the manager page」 | 对话视图文本不含 `切换文件` / `新建工作区文件` / `最近使用` / `取消关联`；`在资源管理器中显示` 在 `VS Code` 按钮之后；浮层仍含三者 | `IdentityCard` 的 `pickerActions` 只在 `!inView` 时拼进动作行；reveal 在 `inView` 时进标题行；不再渲染 forget |
+| 「the manager new-workspace-file button…」 | 管理器表单出现 `data-field="create-name"` 且文本含落点 `D:/home/workspace`；创建调用 `codeWorkspace/create`，参数 `{rootDir:'D:/home/workspace', name:'my-app'}` | `CreateFileForm` 的 `dir` / `showTarget` 与 `createFile(name, dirOverride)`，目标优先取当前行的 `fileDir` |
+| 「the manager recalls recent files…」 | 点「最近使用」后页面不再有 `代码工作区`，最近行可读；点 `关闭` 回到列表 | `managerRecent` + `RecentSection` 的 `onClose` |
 | `:975`、`:1017`、`:1046` | `buttonByLabel(..., '从资源管理器选择')` | 浏览工具栏按钮文字不变 |
 | `:1052` | `buttonByLabel(..., '上级')` | 浏览工具栏按钮文字不变 |
 | `:1092`、`:1103` | `input.props.placeholder.includes('文件夹路径')` | **本文唯一要求修改的两行测试**，见 §5.4 |
@@ -1047,7 +1135,8 @@ fallback 的浅色值取 rc.5 `design-platform.css` 的浅色定义。
 | `panelStyle` | `:2099-2117` | 换成 `§3.4` 的值：`width:430, maxWidth:'calc(100vw - 32px)', maxHeight:'calc(100vh - 96px)', overflow:'auto', padding:12, background:TOKEN.overlay, border:'0.5px solid '+TOKEN.lineStrong, borderRadius:TOKEN.radiusLg, boxShadow:TOKEN.shadow, pointerEvents:'auto', zIndex:400` |
 | `OverlayPanel` | `:2131-2135` | 不用改结构（PanelBody 自带列布局） |
 | `submitAdd` | `:2062-2068` | 不改 |
-| `createFile` / `openFile` / `browseTo` / `reveal` / `loadRecent` / `mutate` / `refresh` | `:654-812`、`:530-601` | 不改 |
+| `createFile` | `:2062-2068` | 加 `dirOverride`（管理器页的落点），其它不改 |
+| `openFile` / `browseTo` / `reveal` / `loadRecent` / `mutate` / `refresh` | `:654-812`、`:530-601` | 不改 |
 | `HeaderButton` / `DockChip` | `:2332-2361` / `:2498-2537` | **不改**（入口 chip 已是原生几何，见 §9） |
 
 ### 7.3 分区 → 函数映射
@@ -1063,7 +1152,7 @@ fallback 的浅色值取 rc.5 `design-platform.css` 的浅色定义。
 | 冲突 | `ConflictSection`（新） | `:1925-1948` | 新函数 |
 | 最近使用 | `RecentSection`（新） + `RecentRow`（新） | `:2038-2057` | 新函数 |
 | 浏览目录 | `BrowseSection`（新） + `BrowseView`（重写） | `:2031-2036` / `:1006-1058` | 浏览区段外壳 + 列表重排 |
-| 代码工作区管理器 | `ManagerBody`（新）+ `ManagerTools`（新）+ `WorkspaceList`（重写） + `WorkspaceRow`（重写） | `:1702-1762` / `:1592-1637`（`forgetFileAt` `:1647-1659` 不改） | 按 §4.12；panel 页的根节点是 `ManagerBody`，`PanelBody` 不再有 panel 分支 |
+| 代码工作区管理器 | `ManagerBody`（新）+ `ManagerTools`（新）+ `managerCreateDir`（新）+ `WorkspaceList`（重写） + `WorkspaceRow`（重写） | `:1702-1762` / `:1592-1637`（`forgetFileAt` `:1647-1659` 不改） | 按 §4.12；panel 页的根节点是 `ManagerBody`，`PanelBody` 不再有 panel 分支；`WorkspaceList` 接收 `form` / `picker` 两个插槽，`ManagerTools` 增加新建 / 最近，最近模式用 `RecentSection` 就地替换列表 |
 | 空状态 | `EmptyWorkspace`（新） | `:1866-1876` | 新函数（仅 view / overlay） |
 | 加载态 | `LoadingCard`（新） | `:1877-1878`（`busy ? status.loading : hint.noFile`） | 新函数，**保留 busy / 非 busy 两个分支**（非 busy 的 `hint.noFile` 被测试 578 依赖） |
 | 终端解说行 | — | 已删 | 管理器页不再画文件夹区，`hint.terminalSession` 没有落点，键与渲染一并移除 |
@@ -1091,6 +1180,16 @@ noticeTone: 'info',
 
 其它 UI 状态（拖拽、复制反馈、hover/focus）**一律放组件本地 `useState`**，不进共享 store，
 避免 `useSyncExternalStore` 因无关重渲染抖动。
+
+**后来新增（文件名搜索，§4.6.10）**：`search`、`searchResults`、`searchBusy`、`searchCursor`、`searchError`、
+`searchTruncated` 进 store，理由与 `entryRename` / `treeOpen` 相同——它们描述「这一页正在显示什么」，普通渲染要看到，
+面板重开 / 切会话时要能一起清掉；局部 `useState` 做不到「别处发起的重置」。
+宿主/命令通道相关的 state 仍然禁止新增：`search` 只是一个读端点。
+
+**后来新增（管理器页的新建 / 最近，§4.12）**：`createDir`（本次新建的落点目录，`null` 表示用会话根）
+与 `managerRecent`（管理器页是否正显示最近列表）进 store：两者都描述「这一页正在显示什么」，
+且挂载 / 切换面时要一起清掉。**不**复用 `showRecent`：那是浮层的最近区，两个面各自的状态
+不该互相决定。
 
 禁止新增与宿主/命令通道有关的 state。
 
@@ -1126,17 +1225,18 @@ noticeTone: 'info',
 - `textOf(tree)` 含 H1 文件名（如 `app.code-workspace`），且**不再**含 `hint.view` 文案。
 - 文件夹行：`nodesWhere(tree, n => n.type === 'div' && textOf(n).includes('D:/ws') && buttonsIn(n).some(b => textOf(b) === '>_'))` 每行恰好 1 个终端按钮（既有 `rowByPath` 辅助函数继续可用）。
 - 每个 `IconButton` 的 `props.title` 非空；`buttonByTitle(tree,'移除').props.onClick` 触发前调用 `window.confirm`（测试可断言 `confirmations.length`）。
-- `buttonByTitle(tree,'取消关联')` 仍是管理器行的 unlink（**不是**页面级按钮）。
+- `buttonByTitle(tree,'取消关联')` 是管理器行的 unlink；详情卡没有页面级「取消关联」。
 - 添加表单：`inputsIn(tree)` 中存在 `props['data-field'] === 'add-path'` 与 `'add-name'`；`buttonByLabel(tree,'添加文件夹').props.disabled` 在路径为空时为 `true`。
-- `panel` 树含 `代码工作区`、`切换文件`、`从资源管理器选择`，且**不含** H1 / `工作区根目录`（那是 view / overlay 的标识卡片）；`view` 树不含管理器行。
+- `panel` 树含 `代码工作区`、`切换文件`、`新建工作区文件`、`最近使用`、`从资源管理器选择`，且**不含** H1 / `工作区根目录`（那是 view / overlay 的标识卡片）；`view` 树不含管理器行，也不含切换 / 新建 / 最近 / 取消关联（`assert.doesNotMatch`）。
+- 标题行里 `在资源管理器中显示` 排在 `VS Code` 之后；折叠详情时它仍在（标题行不折叠），路径与动作行才折叠。
 - busy 时：`nodesWhere(tree, n => n.props && n.props['aria-busy'] === 'true')` 非空；添加按钮 `disabled === true`。
 - error 时：存在 `role="alert"` 的 Banner 且含错误文案；点击关闭后下一渲染不再出现。
-- 未关联文件时（view / overlay）：空状态含 `切换文件` / `新建工作区文件` / `从资源管理器选择` 三个按钮，点击 `切换文件` 触发 `codeWorkspace/browse`。panel 上则是列表自己的空文案，不出现这张卡片。
+- 未关联文件时（view / overlay）：空状态含 `切换文件` / `新建工作区文件` / `从资源管理器选择` 三个按钮，点击 `切换文件` 触发 `codeWorkspace/browse`。panel 上则是列表自己的空文案，不出现这张卡片；panel 的 `新建工作区文件` 在没有落点目录时 `disabled === true`，`title` 含 `先在列表里选中`。
 
 ### 8.2 视觉 / 交互清单（人工）
 
 1. 1014×561：首屏能看到「标识卡片 + 工作区文件夹前 3 行 + 添加表单」，页面无横向滚动。
-2. 层级：H1 明显最大；分区标题可扫读；页面只有「添加文件夹」是实心按钮；「取消关联」在行尾且为红色文字。
+2. 层级：H1 明显最大；分区标题可扫读；页面只有「添加文件夹」是实心按钮；「在资源管理器中显示」和编辑器按钮同高、同在标题行；记录移除的 `✕` 在管理器行尾、红色。
 3. 文件夹行：hover 有底色；主目录行常驻浅底 + 主目录徽标；`✕` 与其它动作之间有竖线；每个图标按钮悬停出现 tooltip。
 4. 动作分组：终端在最左；排序 / 重命名显示名 / 显示在中间组；移除在最右危险组。
 5. 添加文件夹：两个字段有可见标签；路径为空时主按钮禁用；Enter 提交；提交中两个输入框与按钮禁用。
@@ -1154,6 +1254,14 @@ noticeTone: 'info',
 17. 删除：右键 → `删除` → 页内确认框写明是文件还是「文件夹及其全部内容」、写明不进回收站，并显示完整路径，焦点先在 `取消`；`取消` 不发请求、`删除` 后条目消失、绿色 notice 报出被删的名字。
 18. 只读模式：无 `.code-workspace` 文件的会话里，树行的新建 / 重命名 / 删除仍然可用，文件夹行的上移 / 下移 / 重命名显示名 / 移除仍然不出现。
 19. 工作区文件自己那一行（当它落在某个根里时）：`重命名` / `删除` 是禁用的，tooltip 说明原因。
+20. 管理器页动作：列表标为当前的文件在 `D:/a` 时，点 `新建工作区文件`，表单第一行写「位置 D:/a」；
+    输入名字创建后文件出现在 `D:/a`，页面按 `uiWorkspace` 打开它。没有当前文件 / 作用域根时按钮禁用，
+    hover 的 tooltip 说明先选一行。点 `最近使用` 后列表换成最近列表，标题是「最近使用」，`✕` 回到工作区列表。
+21. 文件名搜索（§4.6.10）：在字段里输入 `config`，树被命中列表取代、每次都显示「N 个结果」；`↑`/`↓` 换行且
+    只有选中行有底色；`Enter` 打开预览（右侧栏）；`Esc` 清空、文件夹树连同原来的展开状态一起回来；
+    输入 `zzz` 给「没有匹配的文件。」；输入 `git` 能在结果里看到 `.gitignore`（树里看得见的东西必须搜得到）；
+    **没有 `.code-workspace` 文件的会话（单文件夹工作区）也搜得到自己的文件**；
+    断网 / 端点报错时给红色 `role=alert` 的「搜索失败：…」；切会话或切工作区文件后字段是空的。
 
 ### 8.3 状态矩阵（逐项勾）
 
@@ -1181,12 +1289,15 @@ npm test          # node --test "test/**/*.test.mjs"
   `removeEntry`，见 §4.6.9 与 `design.md` 的「File-level mutations from the tree」）——只增不改，
   既有端点、通道与语义不变。
 - **不改入口 chip**：`HeaderButton` / `DockChip` / 「Open In…」接管保持现状（已是 rc.5 几何）。
-- **不改交互语义**：哪个按钮发哪条命令、`openFile`/`createFile`/`mutate` 的通道选择、
-  `terminal` 的 cd 行为、`WorkspaceView` 的 session scope（`syncPanelScope`）都不变。
+- **交互语义**：除本次要求的「切换 / 新建 / 最近」从详情卡搬到管理器页外，哪个按钮发哪条命令、
+  `openFile`/`createFile`/`mutate` 的通道选择、`terminal` 的 cd 行为、`WorkspaceView` 的 session scope
+  （`syncPanelScope`）都不变。管理器页没有会话，所以它的选择明确走无会话通道（写根的记录），
+  `createFile` 只为管理器多了一个 `dirOverride` 落点参数。
 - **不改浮层宽度**：`shell.overlay` 仍是 430px（创建页弹层的既有约束）。
-- **不做列表虚拟化 / 搜索 / 多选 / 右键菜单**：文件夹数量是 VS Code 级别（个位数到十几），
-  没有虚拟化必要；搜索属于新功能，不在本次视觉重构内。**例外**：文件树行的文件操作菜单（新建 / 重命名 /
-  删除，见 §4.6.9）是后来独立提出的文件管理需求，不是这次视觉重构的一部分；文件夹行的菜单原本就有。
+- **不做列表虚拟化 / 多选 / 右键菜单**：文件夹数量是 VS Code 级别（个位数到十几），
+  没有虚拟化必要。**例外**：文件树行的文件操作菜单（新建 / 重命名 / 删除，见 §4.6.9）是后来独立提出的文件管理需求，
+  不是这次视觉重构的一部分；文件夹行的菜单原本就有。**第二个例外**：树上的文件名搜索（§4.6.10）也是后来独立提出的
+  需求，宿主因此多了一个 `codeWorkspace/search` 端点（只增不改，读的是 `@` 发现已有的那份索引）。
   多选与虚拟化仍然不做。
 - **不删键**：只新增键；`hint.view` / `label.file` / `title` 保留在字典里（键集平衡测试）。
 - **不顺手改测试**：除 §5.4 两行外，任何测试失败都视为实现偏差，回到本文修订。
